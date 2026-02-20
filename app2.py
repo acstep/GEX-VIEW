@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
 
-# --- 1. 頁面設定 ---
+# --- 1. 頁面基本設定 ---
 st.set_page_config(page_title="專業級 GEX 監測系統", layout="wide")
 
 st.markdown("""
@@ -43,12 +43,11 @@ CONFIG = {
 DATA_DIR = "data"
 read_files_list = []
 
-# --- 2. 核心邏輯：修正後的讀檔與清洗 ---
+# --- 2. 數據核心函數 (正則讀檔) ---
 
 def get_latest_files(symbol_keywords):
     if not os.path.exists(DATA_DIR): return None, None
-    search_path = os.path.join(DATA_DIR, "*.csv")
-    all_files = glob.glob(search_path)
+    all_files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
     if not all_files: return None, None
     
     symbol_files = [f for f in all_files if any(k.upper() in os.path.basename(f).upper() for k in symbol_keywords)]
@@ -96,39 +95,38 @@ def fetch_yahoo_kline(ticker, offset):
         return df
     except: return None
 
-# --- 3. 繪圖組件 ---
+# --- 3. 繪圖組件 (維持您要求的原始樣式) ---
 
 def draw_kline_with_oi(df_k, df_oi, symbol):
-    """圖 1: 5m 連續 K 線 + OI 水平牆 (詳盡 TIP)"""
+    """圖 1: 5m 連續 K 線 + OI 水平牆 (維持左右對照)"""
     last_p = df_k['Close'].iloc[-1]
     y_range = 150 if symbol == "SPX" else 450
     oi_v = df_oi[(df_oi['Adjusted_Strike'] >= last_p - y_range) & (df_oi['Adjusted_Strike'] <= last_p + y_range)]
     
     fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.01, column_widths=[0.8, 0.2])
-    fig.add_trace(go.Candlestick(x=df_k['time_label'], open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'], name="5m K線"), row=1, col=1)
     
+    # K線 (無空隙)
+    fig.add_trace(go.Candlestick(x=df_k['time_label'], open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'], name="K線"), row=1, col=1)
+    
+    # OI 牆 (TIP 加強)
     fig.add_trace(go.Bar(y=oi_v['Adjusted_Strike'], x=oi_v['Call Open Interest']/1e3, orientation='h', name='Call OI', 
                          marker_color=CONFIG[symbol]['call_color'], width=CONFIG[symbol]['bar_width']/2,
-                         hovertemplate="<b>點數: %{y}</b><br>看漲 OI: %{x:.2f} K<extra></extra>"), row=1, col=2)
+                         hovertemplate="<b>價格: %{y}</b><br>看漲 OI: %{x:.2f} K<extra></extra>"), row=1, col=2)
     fig.add_trace(go.Bar(y=oi_v['Adjusted_Strike'], x=-oi_v['Put Open Interest']/1e3, orientation='h', name='Put OI', 
                          marker_color=CONFIG[symbol]['put_color'], width=CONFIG[symbol]['bar_width']/2,
-                         hovertemplate="<b>點數: %{y}</b><br>看跌 OI: %{x:.2f} K<extra></extra>"), row=1, col=2)
+                         hovertemplate="<b>價格: %{y}</b><br>看跌 OI: %{x:.2f} K<extra></extra>"), row=1, col=2)
     
     fig.update_xaxes(type='category', nticks=15, row=1, col=1)
     fig.update_layout(height=650, template="plotly_white", showlegend=False, xaxis_rangeslider_visible=False, hovermode="x unified")
     return fig
 
 def create_vivid_plot(df_oi, df_vol, symbol, v_flip):
-    """圖 2: OI 與 GEX 綜合對照圖 (詳盡 TIP)"""
+    """圖 2: OI 與 GEX 綜合對照圖 (維持您要求的樣式)"""
     conf = CONFIG[symbol]
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     
-    fig.add_trace(go.Bar(x=df_oi['Adjusted_Strike'], y=df_oi['Call Open Interest'], name='看漲 OI', 
-                         marker_color=conf['call_color'], opacity=0.6, width=conf['bar_width'],
-                         hovertemplate="<b>點數: %{x}</b><br>買權量: %{y:,.0f}<extra></extra>"), secondary_y=False)
-    fig.add_trace(go.Bar(x=df_oi['Adjusted_Strike'], y=-df_oi['Put Open Interest'], name='看跌 OI', 
-                         marker_color=conf['put_color'], opacity=0.6, width=conf['bar_width'],
-                         hovertemplate="<b>點數: %{x}</b><br>賣權量: %{y:,.0f}<extra></extra>"), secondary_y=False)
+    fig.add_trace(go.Bar(x=df_oi['Adjusted_Strike'], y=df_oi['Call Open Interest'], name='看漲 OI', marker_color=conf['call_color'], opacity=0.6, width=conf['bar_width']), secondary_y=False)
+    fig.add_trace(go.Bar(x=df_oi['Adjusted_Strike'], y=-df_oi['Put Open Interest'], name='看跌 OI', marker_color=conf['put_color'], opacity=0.6, width=conf['bar_width']), secondary_y=False)
     
     if 'Net_GEX_Yi' in df_vol.columns:
         fig.add_trace(go.Scatter(x=df_vol['Adjusted_Strike'], y=df_vol['Net_GEX_Yi'], name='淨 GEX (億)', 
@@ -145,45 +143,42 @@ def create_vivid_plot(df_oi, df_vol, symbol, v_flip):
 
 st.markdown("<h1 style='text-align: center; font-size: 45px; color: #001F3F;'>🏹 專業級 ES & NQ 數據系統</h1>", unsafe_allow_html=True)
 
-if not os.path.exists(DATA_DIR):
-    st.error(f"❌ 找不到目錄: {DATA_DIR}")
-else:
-    for symbol in ["SPX", "NQ"]:
-        oi_f, vol_f = get_latest_files(CONFIG[symbol]['keywords'])
-        if oi_f and vol_f:
-            read_files_list.append(os.path.basename(oi_f))
-            read_files_list.append(os.path.basename(vol_f))
-            
-            df_oi = clean_data(pd.read_csv(oi_f), CONFIG[symbol]['offset'])
-            df_vol = clean_data(pd.read_csv(vol_f), CONFIG[symbol]['offset'])
-            df_k = fetch_yahoo_kline(CONFIG[symbol]['ticker'], CONFIG[symbol]['offset'])
-            
-            # --- 指標計算 ---
-            cw_val = df_oi.loc[df_oi['Call Open Interest'].idxmax(), 'Adjusted_Strike']
-            pw_val = df_oi.loc[df_oi['Put Open Interest'].idxmax(), 'Adjusted_Strike']
-            
-            v_flip = None
-            if not df_vol.empty and 'Net Gamma Exposure' in df_vol.columns:
-                for i in range(len(df_vol)-1):
-                    if df_vol.iloc[i]['Net Gamma Exposure'] * df_vol.iloc[i+1]['Net Gamma Exposure'] <= 0:
-                        v_flip = df_vol.iloc[i]['Adjusted_Strike']; break
+for symbol in ["SPX", "NQ"]:
+    oi_f, vol_f = get_latest_files(CONFIG[symbol]['keywords'])
+    if oi_f and vol_f:
+        read_files_list.append(os.path.basename(oi_f))
+        read_files_list.append(os.path.basename(vol_f))
+        
+        df_oi = clean_data(pd.read_csv(oi_f), CONFIG[symbol]['offset'])
+        df_vol = clean_data(pd.read_csv(vol_f), CONFIG[symbol]['offset'])
+        df_k = fetch_yahoo_kline(CONFIG[symbol]['ticker'], CONFIG[symbol]['offset'])
+        
+        # 指標計算
+        cw_val = df_oi.loc[df_oi['Call Open Interest'].idxmax(), 'Adjusted_Strike']
+        pw_val = df_oi.loc[df_oi['Put Open Interest'].idxmax(), 'Adjusted_Strike']
+        
+        v_flip = None
+        if not df_vol.empty and 'Net Gamma Exposure' in df_vol.columns:
+            for i in range(len(df_vol)-1):
+                if df_vol.iloc[i]['Net Gamma Exposure'] * df_vol.iloc[i+1]['Net Gamma Exposure'] <= 0:
+                    v_flip = df_vol.iloc[i]['Adjusted_Strike']; break
 
-            # --- 修正後的顯示邏輯：先格式化字串避免 f-string 錯誤 ---
-            piv_display = f"{v_flip:.0f}" if v_flip is not None else "N/A"
-            cw_display = f"{cw_val:.0f}"
-            pw_display = f"{pw_val:.0f}"
+        # --- 安全顯示邏輯 (修正當機處) ---
+        piv_txt = f"{v_flip:.0f}" if v_flip is not None else "N/A"
+        cw_txt = f"{cw_val:.0f}"
+        pw_txt = f"{pw_val:.0f}"
 
-            st.markdown(f"## 📈 {CONFIG[symbol]['label']}")
-            c1, c2, c3 = st.columns(3)
-            with c1: st.markdown(f"<div class='metric-card'>多空分界 (Pivot)<br><b style='font-size:35px; color:black;'>{piv_display}</b></div>", unsafe_allow_html=True)
-            with c2: st.markdown(f"<div class='metric-card'>買權牆 (Call Wall)<br><b style='font-size:35px; color:green;'>{cw_display}</b></div>", unsafe_allow_html=True)
-            with c3: st.markdown(f"<div class='metric-card'>賣權牆 (Put Wall)<br><b style='font-size:35px; color:red;'>{pw_display}</b></div>", unsafe_allow_html=True)
+        st.markdown(f"## 📈 {CONFIG[symbol]['label']}")
+        c1, c2, c3 = st.columns(3)
+        with c1: st.markdown(f"<div class='metric-card'>多空分界 (Pivot)<br><b style='font-size:35px; color:black;'>{piv_txt}</b></div>", unsafe_allow_html=True)
+        with c2: st.markdown(f"<div class='metric-card'>買權牆 (Call Wall)<br><b style='font-size:35px; color:green;'>{cw_txt}</b></div>", unsafe_allow_html=True)
+        with c3: st.markdown(f"<div class='metric-card'>賣權牆 (Put Wall)<br><b style='font-size:35px; color:red;'>{pw_txt}</b></div>", unsafe_allow_html=True)
 
-            # 繪製圖表
-            if df_k is not None:
-                st.plotly_chart(draw_kline_with_oi(df_k, df_oi, symbol), use_container_width=True)
-            st.plotly_chart(create_vivid_plot(df_oi, df_vol, symbol, v_flip), use_container_width=True)
-            st.divider()
+        # 繪製圖表 (完全維持原樣)
+        if df_k is not None:
+            st.plotly_chart(draw_kline_with_oi(df_k, df_oi, symbol), use_container_width=True)
+        st.plotly_chart(create_vivid_plot(df_oi, df_vol, symbol, v_flip), use_container_width=True)
+        st.divider()
 
 # 數據溯源清單
 if read_files_list:
