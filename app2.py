@@ -3,148 +3,156 @@ import pandas as pd
 import numpy as np
 import os
 import glob
+import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# 頁面設定
-st.set_page_config(page_title="高精度 GEX 監測系統", layout="wide")
+# --- 1. 頁面基本設定 ---
+st.set_page_config(page_title="ES & NQ 關鍵點位監控", layout="wide")
 
-# 背景淡藍色 CSS
 st.markdown("""
     <style>
     .stApp { background-color: #F0F8FF; }
+    .stMarkdown h2 { color: #001F3F; border-bottom: 3px solid #001F3F; padding-bottom: 10px; margin-top: 50px; }
     </style>
     """, unsafe_allow_html=True)
 
+# 顏色設定 (維持 Barchart 風格)
+COLORS = {
+    "pos_bar": "#0000FF", "neg_bar": "#FFA500", "agg_line": "#3498db",
+    "flip_line": "#FF0000", "price_line": "#008000",
+    "wall_line": "#FF0000", # 重要點位紅線
+    "bg_green": "rgba(0, 255, 0, 0.05)", "bg_red": "rgba(255, 0, 0, 0.05)"
+}
+
 CONFIG = {
-    "SPX": {
-        "label": "ES / SPX (標普 500)",
-        "offset": 0,
-        "call_color": "#008000", 
-        "put_color": "#B22222",  
-        "bar_width": 4,          
-        "keywords": ["SPX", "ES"]
-    },
-    "NQ": {
-        "label": "NQ / NASDAQ 100 (那指)",
-        "offset": 75,
-        "call_color": "#000080", 
-        "put_color": "#FF4500",  
-        "bar_width": 20,         
-        "keywords": ["IUXX", "NQ"]
-    }
+    "SPX": {"label": "🇺🇸 ES / SPX (標普 500)", "ticker": "^SPX", "basis": 17.4, "keywords": ["SPX", "ES"]},
+    "NQ": {"label": "💻 NQ / NASDAQ 100 (那斯達克)", "ticker": "^NDX", "basis": 57.6, "keywords": ["IUXX", "NQ"]}
 }
 DATA_DIR = "data"
 
-# --- 側邊欄 ---
-st.sidebar.markdown("### 🔍 觀察範圍控制")
-range_spx = st.sidebar.slider("SPX 範圍", 50, 2000, 500, step=50)
-range_nq = st.sidebar.slider("NQ 範圍", 100, 3000, 1000, step=100)
-RANGE_MAP = {"SPX": range_spx, "NQ": range_nq}
+# --- 2. 數據核心函數 ---
 
-def get_latest_files(symbol_keywords):
+@st.cache_data(ttl=60)
+def fetch_yahoo_kline(ticker, basis):
+    try:
+        df = yf.download(ticker, period="5d", interval="5m", progress=False)
+        if df.empty: return None
+        if df.columns.nlevels > 1:
+            df.columns = df.columns.get_level_values(0)
+        df = df + basis
+        df['time_label'] = df.index.strftime('%m-%d %H:%M')
+        return df
+    except: return None
+
+def get_latest_files(keywords):
     if not os.path.exists(DATA_DIR): return None, None
-    search_path = os.path.join(DATA_DIR, "*.csv")
-    all_files = glob.glob(search_path)
-    if not all_files: return None, None
-    symbol_files = [f for f in all_files if any(k.upper() in os.path.basename(f).upper() for k in symbol_keywords)]
+    all_files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
+    symbol_files = [f for f in all_files if any(k.upper() in os.path.basename(f).upper() for k in keywords)]
     if not symbol_files: return None, None
-    oi_files = [f for f in symbol_files if "open-interest" in f.lower()]
-    vol_files = [f for f in symbol_files if "open-interest" not in f.lower()]
-    latest_oi = max(oi_files, key=os.path.getmtime) if oi_files else None
-    latest_vol = max(vol_files, key=os.path.getmtime) if vol_files else None
-    return latest_oi, latest_vol
+    oi_f = [f for f in symbol_files if "open-interest" in f.lower()]
+    vol_f = [f for f in symbol_files if "open-interest" not in f.lower()]
+    return (max(oi_f, key=os.path.getmtime) if oi_f else None, 
+            max(vol_f, key=os.path.getmtime) if vol_f else None)
 
-def clean_data(df, offset):
-    cols = ['Strike', 'Call Open Interest', 'Put Open Interest', 'Net Gamma Exposure']
-    for col in cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+def clean_csv(filepath, basis):
+    df = pd.read_csv(filepath)
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce')
     df = df.dropna(subset=['Strike']).sort_values('Strike')
-    df['Adjusted_Strike'] = df['Strike'] + offset
-    if 'Net Gamma Exposure' in df.columns:
-        df['Net_GEX_Yi'] = df['Net Gamma Exposure'] / 1e8
+    df['Strike_Fut'] = df['Strike'] + basis
     return df
 
-def create_vivid_plot(df_oi, df_vol, symbol):
-    conf = CONFIG[symbol]
-    
-    # 計算關鍵位
-    cw_idx = df_oi['Call Open Interest'].idxmax()
-    pw_idx = df_oi['Put Open Interest'].idxmax()
-    cw, pw = df_oi.loc[cw_idx, 'Adjusted_Strike'], df_oi.loc[pw_idx, 'Adjusted_Strike']
-    
-    v_flip = None
-    for i in range(len(df_vol)-1):
-        if df_vol.iloc[i]['Net Gamma Exposure'] * df_vol.iloc[i+1]['Net Gamma Exposure'] <= 0:
-            v_flip = df_vol.iloc[i]['Adjusted_Strike']
-            break
+def get_key_walls(df):
+    """偵測 Call Wall (最大 Call OI) 與 Put Wall (最大 Put OI)"""
+    call_wall = df.loc[df['Call Open Interest'].idxmax(), 'Strike_Fut']
+    put_wall = df.loc[df['Put Open Interest'].idxmax(), 'Strike_Fut']
+    return call_wall, put_wall
 
+def get_safe_float(series):
+    val = series.iloc[-1]
+    return float(val.iloc[0]) if isinstance(val, pd.Series) else float(val)
+
+# --- 3. 繪圖組件 ---
+
+def draw_kline_profile(oi_df, symbol):
+    """圖 1: 連續 K 線 + 紅線關鍵點位"""
+    df_k = fetch_yahoo_kline(CONFIG[symbol]['ticker'], CONFIG[symbol]['basis'])
+    if df_k is None: return
+    last_p = get_safe_float(df_k['Close'])
+    call_wall, put_wall = get_key_walls(oi_df)
+    
+    y_range = 150 if symbol == "SPX" else 450 
+    oi_v = oi_df[(oi_df['Strike_Fut'] >= last_p - y_range) & (oi_df['Strike_Fut'] <= last_p + y_range)].copy()
+    diff = oi_v['Strike_Fut'].diff().median()
+    bar_w = (diff if not pd.isna(diff) else 5) * 0.7
+
+    fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.01, column_widths=[0.8, 0.2])
+    fig.add_trace(go.Candlestick(x=df_k['time_label'], open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'], name="K線"), row=1, col=1)
+    
+    # 畫出 Call Wall 與 Put Wall 紅線
+    fig.add_hline(y=call_wall, line_color=COLORS['wall_line'], line_width=2, line_dash="solid", 
+                  annotation_text=f"Call Wall: {call_wall}", annotation_position="top left")
+    fig.add_hline(y=put_wall, line_color=COLORS['wall_line'], line_width=2, line_dash="solid", 
+                  annotation_text=f"Put Wall: {put_wall}", annotation_position="bottom left")
+    fig.add_hline(y=last_p, line_dash="dash", line_color=COLORS['price_line'], annotation_text="現價")
+
+    # OI 牆
+    fig.add_trace(go.Bar(y=oi_v['Strike_Fut'], x=oi_v['Call Open Interest']/1e3, orientation='h', marker_color=COLORS['pos_bar'], width=bar_w, hovertemplate="Strike: %{y}<br>Call OI: %{x:.1f}K"), row=1, col=2)
+    fig.add_trace(go.Bar(y=oi_v['Strike_Fut'], x=-oi_v['Put Open Interest']/1e3, orientation='h', marker_color=COLORS['neg_bar'], width=bar_w, hovertemplate="Strike: %{y}<br>Put OI: %{x:.1f}K"), row=1, col=2)
+
+    fig.update_xaxes(type='category', nticks=15, row=1, col=1)
+    fig.update_layout(height=750, template="plotly_white", showlegend=False, xaxis_rangeslider_visible=False, hovermode="x unified")
+    st.plotly_chart(fig, width='stretch')
+
+def draw_gex_main(gamma_df, symbol, oi_df):
+    """圖 2: 淨 Gamma 圖 + 紅線"""
+    df_k = fetch_yahoo_kline(CONFIG[symbol]['ticker'], CONFIG[symbol]['basis'])
+    last_p = get_safe_float(df_k['Close']) if df_k is not None else 0
+    call_wall, put_wall = get_key_walls(oi_df)
+    
     fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Bar(x=gamma_df['Strike_Fut'], y=gamma_df['Net Gamma Exposure']/1e8, marker_color=np.where(gamma_df['Net Gamma Exposure']>=0, COLORS['pos_bar'], COLORS['neg_bar']), hovertemplate="Strike: %{x}<br>GEX: %{y:.2f}億"), secondary_y=False)
+    fig.add_trace(go.Scatter(x=gamma_df['Strike_Fut'], y=gamma_df['Gamma Exposure Profile']/1e9, line=dict(color=COLORS['agg_line'], width=4), hovertemplate="Agg GEX: %{y:.2f}B"), secondary_y=True)
+    
+    # 標註關鍵紅線
+    fig.add_vline(x=call_wall, line_color=COLORS['wall_line'], line_dash="solid", annotation_text="Call Wall")
+    fig.add_vline(x=put_wall, line_color=COLORS['wall_line'], line_dash="solid", annotation_text="Put Wall")
+    fig.add_vline(x=last_p, line_color=COLORS['price_line'], line_dash="dash")
+    
+    fig.update_layout(title=f"<b>{symbol} 淨 Gamma 分佈 (紅線為關鍵城牆)</b>", height=500, template="plotly_white")
+    st.plotly_chart(fig, width='stretch')
 
-    # 1. 柱狀圖 (OI)
-    fig.add_trace(go.Bar(
-        x=df_oi['Adjusted_Strike'], y=df_oi['Call Open Interest'],
-        name='看漲 OI', marker_color=conf['call_color'], opacity=0.6, width=conf['bar_width'],
-        hovertemplate='<b>價格: %{x}</b><br>看漲口數: %{y:,.0f}<extra></extra>'
-    ), secondary_y=False)
+def draw_details(df, symbol, mode="Gamma"):
+    """圖 3 & 4: 細節對比"""
+    call_wall, put_wall = get_key_walls(df)
+    scale = 1e8 if mode == "Gamma" else 1e3
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=df['Strike_Fut'], y=df["Call Gamma Exposure" if mode=="Gamma" else "Call Open Interest"]/scale, name="Call", marker_color=COLORS['pos_bar']))
+    fig.add_trace(go.Bar(x=df['Strike_Fut'], y=df["Put Gamma Exposure" if mode=="Gamma" else "Put Open Interest"]/scale if mode=="Gamma" else -df["Put Open Interest"]/scale, name="Put", marker_color=COLORS['neg_bar']))
+    
+    fig.add_vline(x=call_wall, line_color=COLORS['wall_line'], line_width=2)
+    fig.add_vline(x=put_wall, line_color=COLORS['wall_line'], line_width=2)
+    
+    fig.update_layout(title=f"{symbol} {mode} 細節 (紅線為 Call/Put Wall)", height=400, barmode='relative', template="plotly_white")
+    st.plotly_chart(fig, width='stretch')
 
-    fig.add_trace(go.Bar(
-        x=df_oi['Adjusted_Strike'], y=-df_oi['Put Open Interest'],
-        name='看跌 OI', marker_color=conf['put_color'], opacity=0.6, width=conf['bar_width'],
-        hovertemplate='<b>價格: %{x}</b><br>看跌口數: %{y:,.0f}<extra></extra>'
-    ), secondary_y=False)
+# --- 4. 主介面 ---
 
-    # 2. Gamma 曲線 (單位：億)
-    fig.add_trace(go.Scatter(
-        x=df_oi['Adjusted_Strike'], y=df_oi['Net_GEX_Yi'],
-        name='淨 GEX (億)', line=dict(color='#00008B', width=5), 
-        hovertemplate='淨 Gamma: %{y:,.2f} 億<extra></extra>'
-    ), secondary_y=True)
+st.markdown("<h1 style='text-align: center;'>🎯 ES & NQ 關鍵城牆監控 (紅線提醒版)</h1>", unsafe_allow_html=True)
 
-    # --- 💡 關鍵功能：自動繪製大量參考紅線 ---
-    # 找出曝險絕對值前 15 大的執行價，並在該處畫線
-    top_exposures = df_oi.nlargest(15, 'Net_GEX_Yi')['Adjusted_Strike'].tolist()
-    for strike in top_exposures:
-        fig.add_vline(x=strike, line_width=0.5, line_dash="solid", line_color="rgba(255, 0, 0, 0.2)")
-
-    # 垂直標註線 (主要牆位)
-    line_font = dict(size=18, color="black", family="Arial Black")
-    if cw: fig.add_vline(x=cw, line_dash="dash", line_color="green", line_width=3, annotation_text=f"買權牆:{cw:.0f}", annotation_font=line_font)
-    if pw: fig.add_vline(x=pw, line_dash="dash", line_color="red", line_width=3, annotation_text=f"賣權牆:{pw:.0f}", annotation_font=line_font)
-    if v_flip: fig.add_vline(x=v_flip, line_width=4, line_color="black", annotation_text=f"轉折:{v_flip:.0f}", annotation_font=line_font)
-
-    fig.update_layout(
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#F0F8FF',
-        hovermode="x unified", height=650,
-        title=dict(text=f"<b>{conf['label']} 數據監測 (含主要曝險紅線)</b>", font=dict(size=28, color='black')),
-        xaxis=dict(
-            title=dict(text="執行價 (Strike)", font=dict(size=20, color='black')),
-            tickfont=dict(size=16, color='black'), gridcolor='white',
-            range=[v_flip - RANGE_MAP[symbol], v_flip + RANGE_MAP[symbol]] if v_flip else None
-        ),
-        yaxis=dict(title=dict(text="未平倉合約 (OI)", font=dict(size=20, color='black')), tickfont=dict(size=16, color='black')),
-        yaxis2=dict(title=dict(text="GEX 強度 (億美元)", font=dict(size=20, color='black')), tickfont=dict(size=16, color='black'), overlaying='y', side='right', showgrid=False),
-        hoverlabel=dict(bgcolor="#001F3F", font_size=20, font_color="white", font_family="Arial Black"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(size=18, color='black')),
-        margin=dict(l=80, r=80, t=120, b=80),
-        bargap=0.05
-    )
-    return fig
-
-# --- 主程式 ---
-st.markdown("<h1 style='text-align: center; font-size: 45px; color: #001F3F;'>🏹 專業級 ES & NQ 數據系統</h1>", unsafe_allow_html=True)
-
-for symbol in ["SPX", "NQ"]:
-    oi_f, vol_f = get_latest_files(CONFIG[symbol]['keywords'])
+for asset in ["SPX", "NQ"]:
+    st.markdown(f"---")
+    st.markdown(f"## {CONFIG[asset]['label']}")
+    oi_f, vol_f = get_latest_files(CONFIG[asset]['keywords'])
+    
     if oi_f and vol_f:
-        df_oi = clean_data(pd.read_csv(oi_f), CONFIG[symbol]['offset'])
-        df_vol = clean_data(pd.read_csv(vol_f), CONFIG[symbol]['offset'])
-        
-        # 顯示看板與圖表
-        st.markdown(f"<h2 style='color: #004080; font-size: 35px;'>📈 {CONFIG[symbol]['label']}</h2>", unsafe_allow_html=True)
-        st.plotly_chart(create_vivid_plot(df_oi, df_vol, symbol), use_container_width=True)
-        st.divider()
-
-with st.expander("📖 數據解讀說明", expanded=False):
-    st.markdown("... (保留之前的解釋文字) ...")
+        df_oi = clean_csv(oi_f, CONFIG[asset]['basis'])
+        df_vol = clean_csv(vol_f, CONFIG[asset]['basis'])
+        draw_kline_profile(df_oi, asset)
+        draw_gex_main(df_vol, asset, df_oi)
+        draw_details(df_oi, asset, mode="Gamma")
+        draw_details(df_oi, asset, mode="Open Interest")
+    else:
+        st.error(f"❌ 找不到 {asset} 的檔案")
