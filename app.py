@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import glob
+import re
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -44,16 +45,39 @@ range_nq = st.sidebar.slider("NQ 範圍", 100, 3000, 1000, step=100)
 RANGE_MAP = {"SPX": range_spx, "NQ": range_nq}
 
 def get_latest_files(symbol_keywords):
+    """
+    排序邏輯：日期 (YYYYMMDD) > 版本編號 (-1, -2) > 修改時間
+    """
     if not os.path.exists(DATA_DIR): return None, None
     search_path = os.path.join(DATA_DIR, "*.csv")
     all_files = glob.glob(search_path)
     if not all_files: return None, None
+    
     symbol_files = [f for f in all_files if any(k.upper() in os.path.basename(f).upper() for k in symbol_keywords)]
     if not symbol_files: return None, None
+
+    def get_sort_key(f):
+        fname = os.path.basename(f)
+        # 1. 抓取日期 (YYYYMMDD)
+        date_match = re.search(r'(\d{8})', fname)
+        date_str = date_match.group(1) if date_match else "00000000"
+        
+        # 2. 抓取版本編號 (例如 -monthly-2.csv 中的 2)
+        # 尋找副檔名前面連字號帶數字的模式
+        suffix_match = re.search(r'-(\d+)\.csv$', fname)
+        suffix_val = int(suffix_match.group(1)) if suffix_match else 0
+        
+        # 回傳排序元組：(日期, 版本號, 修改時間)
+        return (date_str, suffix_val, os.path.getmtime(f))
+
+    # 區分 OI 與 Vol 檔案
     oi_files = [f for f in symbol_files if "open-interest" in f.lower()]
     vol_files = [f for f in symbol_files if "open-interest" not in f.lower()]
-    latest_oi = max(oi_files, key=os.path.getmtime) if oi_files else None
-    latest_vol = max(vol_files, key=os.path.getmtime) if vol_files else None
+    
+    # 找出權重最大的檔案 (max 函數會依序比對元組內的元素)
+    latest_oi = max(oi_files, key=get_sort_key) if oi_files else None
+    latest_vol = max(vol_files, key=get_sort_key) if vol_files else None
+    
     return latest_oi, latest_vol
 
 def clean_data(df, offset):
@@ -132,7 +156,7 @@ else:
             df_oi = clean_data(pd.read_csv(oi_f), CONFIG[symbol]['offset'])
             df_vol = clean_data(pd.read_csv(vol_f), CONFIG[symbol]['offset'])
             
-            # --- 修正處：提早計算數值 ---
+            # 數值預處理
             cw_idx = df_oi['Call Open Interest'].idxmax()
             pw_idx = df_oi['Put Open Interest'].idxmax()
             cw_val = df_oi.loc[cw_idx, 'Adjusted_Strike']
@@ -145,7 +169,6 @@ else:
                         v_flip = df_vol.iloc[i]['Adjusted_Strike']
                         break
             
-            # 轉為字串避免 f-string 內判斷出錯
             piv_text = f"{v_flip:.0f}" if v_flip is not None else "N/A"
             cw_text = f"{cw_val:.0f}"
             pw_text = f"{pw_val:.0f}"
@@ -153,7 +176,6 @@ else:
             st.markdown(f"<h2 style='color: #004080; font-size: 35px;'>📈 {CONFIG[symbol]['label']}</h2>", unsafe_allow_html=True)
             
             c1, c2, c3 = st.columns(3)
-            # 現在 f-string 內容非常單純，不會報錯
             with c1: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>多空分界 (Pivot)<br><b style='font-size:35px; color:black;'>{piv_text}</b></div>", unsafe_allow_html=True)
             with c2: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>買權牆 (Call Wall)<br><b style='font-size:35px; color:green;'>{cw_text}</b></div>", unsafe_allow_html=True)
             with c3: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>賣權牆 (Put Wall)<br><b style='font-size:35px; color:red;'>{pw_text}</b></div>", unsafe_allow_html=True)
