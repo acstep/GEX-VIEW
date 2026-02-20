@@ -45,50 +45,52 @@ range_nq = st.sidebar.slider("NQ 範圍", 100, 3000, 1000, step=100)
 RANGE_MAP = {"SPX": range_spx, "NQ": range_nq}
 
 def get_latest_files(symbol_keywords):
-    """
-    排序邏輯：日期 (YYYYMMDD) > 版本編號 (-1, -2) > 修改時間
-    """
     if not os.path.exists(DATA_DIR): return None, None
     search_path = os.path.join(DATA_DIR, "*.csv")
     all_files = glob.glob(search_path)
     if not all_files: return None, None
-    
     symbol_files = [f for f in all_files if any(k.upper() in os.path.basename(f).upper() for k in symbol_keywords)]
     if not symbol_files: return None, None
 
     def get_sort_key(f):
         fname = os.path.basename(f)
-        # 1. 抓取日期 (YYYYMMDD)
         date_match = re.search(r'(\d{8})', fname)
         date_str = date_match.group(1) if date_match else "00000000"
-        
-        # 2. 抓取版本編號 (例如 -monthly-2.csv 中的 2)
-        # 尋找副檔名前面連字號帶數字的模式
         suffix_match = re.search(r'-(\d+)\.csv$', fname)
         suffix_val = int(suffix_match.group(1)) if suffix_match else 0
-        
-        # 回傳排序元組：(日期, 版本號, 修改時間)
         return (date_str, suffix_val, os.path.getmtime(f))
 
-    # 區分 OI 與 Vol 檔案
     oi_files = [f for f in symbol_files if "open-interest" in f.lower()]
     vol_files = [f for f in symbol_files if "open-interest" not in f.lower()]
-    
-    # 找出權重最大的檔案 (max 函數會依序比對元組內的元素)
     latest_oi = max(oi_files, key=get_sort_key) if oi_files else None
     latest_vol = max(vol_files, key=get_sort_key) if vol_files else None
-    
     return latest_oi, latest_vol
 
 def clean_data(df, offset):
-    cols = ['Strike', 'Call Open Interest', 'Put Open Interest', 'Net Gamma Exposure']
-    for col in cols:
+    # --- 💡 新增：自動校正欄位名稱 ---
+    rename_dict = {}
+    for col in df.columns:
+        c_upper = col.upper().strip()
+        if "STRIKE" in c_upper: rename_dict[col] = "Strike"
+        elif "CALL" in c_upper and "INTEREST" in c_upper: rename_dict[col] = "Call Open Interest"
+        elif "PUT" in c_upper and "INTEREST" in c_upper: rename_dict[col] = "Put Open Interest"
+        elif "NET" in c_upper and "GAMMA" in c_upper: rename_dict[col] = "Net Gamma Exposure"
+        elif "NET" in c_upper and "GEX" in c_upper: rename_dict[col] = "Net Gamma Exposure"
+    
+    df = df.rename(columns=rename_dict)
+    
+    # 標準欄位處理
+    standard_cols = ['Strike', 'Call Open Interest', 'Put Open Interest', 'Net Gamma Exposure']
+    for col in standard_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
+        else:
+            # 如果還是找不到欄位，補 0 避免報錯
+            df[col] = 0.0
+            
     df = df.dropna(subset=['Strike']).sort_values('Strike')
     df['Adjusted_Strike'] = df['Strike'] + offset
-    if 'Net Gamma Exposure' in df.columns:
-        df['Net_GEX_Yi'] = df['Net Gamma Exposure'] / 1e8
+    df['Net_GEX_Yi'] = df['Net Gamma Exposure'] / 1e8
     return df
 
 def create_vivid_plot(df_oi, df_vol, symbol, v_flip):
@@ -150,51 +152,4 @@ else:
     for symbol in ["SPX", "NQ"]:
         oi_f, vol_f = get_latest_files(CONFIG[symbol]['keywords'])
         if oi_f and vol_f:
-            read_files_list.append(os.path.basename(oi_f))
-            read_files_list.append(os.path.basename(vol_f))
-            
-            df_oi = clean_data(pd.read_csv(oi_f), CONFIG[symbol]['offset'])
-            df_vol = clean_data(pd.read_csv(vol_f), CONFIG[symbol]['offset'])
-            
-            # 數值預處理
-            cw_idx = df_oi['Call Open Interest'].idxmax()
-            pw_idx = df_oi['Put Open Interest'].idxmax()
-            cw_val = df_oi.loc[cw_idx, 'Adjusted_Strike']
-            pw_val = df_oi.loc[pw_idx, 'Adjusted_Strike']
-            
-            v_flip = None
-            if not df_vol.empty:
-                for i in range(len(df_vol)-1):
-                    if df_vol.iloc[i]['Net Gamma Exposure'] * df_vol.iloc[i+1]['Net Gamma Exposure'] <= 0:
-                        v_flip = df_vol.iloc[i]['Adjusted_Strike']
-                        break
-            
-            piv_text = f"{v_flip:.0f}" if v_flip is not None else "N/A"
-            cw_text = f"{cw_val:.0f}"
-            pw_text = f"{pw_val:.0f}"
-
-            st.markdown(f"<h2 style='color: #004080; font-size: 35px;'>📈 {CONFIG[symbol]['label']}</h2>", unsafe_allow_html=True)
-            
-            c1, c2, c3 = st.columns(3)
-            with c1: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>多空分界 (Pivot)<br><b style='font-size:35px; color:black;'>{piv_text}</b></div>", unsafe_allow_html=True)
-            with c2: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>買權牆 (Call Wall)<br><b style='font-size:35px; color:green;'>{cw_text}</b></div>", unsafe_allow_html=True)
-            with c3: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>賣權牆 (Put Wall)<br><b style='font-size:35px; color:red;'>{pw_text}</b></div>", unsafe_allow_html=True)
-
-            st.plotly_chart(create_vivid_plot(df_oi, df_vol, symbol, v_flip), use_container_width=True)
-            st.divider()
-
-# 底部解讀說明
-with st.expander("📖 數據解讀說明 (GEX 概念指南)", expanded=True):
-    st.markdown("""
-    ### 🔵 淨 GEX (Net Gamma Exposure) —— 「結構性資金」
-    * **計算來源**：依據 **未平倉合約 (Open Interest, OI)**。
-    * **單位解讀**：代表市場的底層結構，反映的是大戶、法人長線佈局。
-    ### 🟠 波動 GEX (Vol Gamma Exposure) —— 「動態資金」
-    * **計算來源**：依據 **當日成交量 (Volume)**。
-    """, unsafe_allow_html=True)
-
-if read_files_list:
-    st.markdown("--- ")
-    st.markdown("### 📂 本次讀取的數據檔案：")
-    for f in sorted(list(set(read_files_list))):
-        st.code(f)
+            read_files_list.append(os.path.basename
