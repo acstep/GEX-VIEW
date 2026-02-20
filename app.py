@@ -152,4 +152,50 @@ else:
     for symbol in ["SPX", "NQ"]:
         oi_f, vol_f = get_latest_files(CONFIG[symbol]['keywords'])
         if oi_f and vol_f:
-            read_files_list.append(os.path.basename
+            read_files_list.append(os.path.basename(oi_f))
+            read_files_list.append(os.path.basename(vol_f))
+            
+            df_oi = clean_data(pd.read_csv(oi_f), CONFIG[symbol]['offset'])
+            df_vol = clean_data(pd.read_csv(vol_f), CONFIG[symbol]['offset'])
+            
+            # --- 核心數值預算 ---
+            try:
+                cw_idx = df_oi['Call Open Interest'].idxmax()
+                pw_idx = df_oi['Put Open Interest'].idxmax()
+                cw_val = df_oi.loc[cw_idx, 'Adjusted_Strike']
+                pw_val = df_oi.loc[pw_idx, 'Adjusted_Strike']
+                
+                v_flip = None
+                if not df_vol.empty and 'Net Gamma Exposure' in df_vol.columns:
+                    for i in range(len(df_vol)-1):
+                        y1 = df_vol.iloc[i]['Net Gamma Exposure']
+                        y2 = df_vol.iloc[i+1]['Net Gamma Exposure']
+                        if y1 * y2 <= 0:
+                            v_flip = df_vol.iloc[i]['Adjusted_Strike']
+                            break
+                
+                piv_text = f"{v_flip:.0f}" if v_flip is not None else "N/A"
+                cw_text = f"{cw_val:.0f}"
+                pw_text = f"{pw_val:.0f}"
+
+                st.markdown(f"<h2 style='color: #004080; font-size: 35px;'>📈 {CONFIG[symbol]['label']}</h2>", unsafe_allow_html=True)
+                
+                c1, c2, c3 = st.columns(3)
+                with c1: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>多空分界 (Pivot)<br><b style='font-size:35px; color:black;'>{piv_text}</b></div>", unsafe_allow_html=True)
+                with c2: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>買權牆 (Call Wall)<br><b style='font-size:35px; color:green;'>{cw_text}</b></div>", unsafe_allow_html=True)
+                with c3: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>賣權牆 (Put Wall)<br><b style='font-size:35px; color:red;'>{pw_text}</b></div>", unsafe_allow_html=True)
+
+                st.plotly_chart(create_vivid_plot(df_oi, df_vol, symbol, v_flip), use_container_width=True)
+                st.divider()
+            except Exception as e:
+                st.error(f"處理 {symbol} 數據時發生錯誤: {e}")
+
+# 底部解讀說明與檔案列表
+with st.expander("📖 數據解讀說明", expanded=True):
+    st.markdown("...") # 省略重複說明
+
+if read_files_list:
+    st.markdown("--- ")
+    st.markdown("### 📂 本次讀取的數據檔案：")
+    for f in sorted(list(set(read_files_list))):
+        st.code(f)
