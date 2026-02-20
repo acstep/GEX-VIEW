@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # --- 1. 頁面基本設定 ---
-st.set_page_config(page_title="專業級 ES & NQ 數據監控系統", layout="wide")
+st.set_page_config(page_title="ES & NQ 籌碼監控 (無空隙連續版)", layout="wide")
 
 # 背景淡藍色
 st.markdown("""
@@ -18,36 +18,20 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 完全複製 Barchart 色彩代碼
+# 完全複製 Barchart 色彩
 COLORS = {
-    "pos_bar": "#0000FF",        # 正值：藍色
-    "neg_bar": "#FFA500",        # 負值：橘色
-    "agg_line": "#3498db",       # 累計曲線：亮藍色
-    "flip_line": "#FF0000",      # Flip：紅色
-    "price_line": "#008000",     # 現價：深綠色
-    "bg_green": "rgba(0, 255, 0, 0.05)", 
-    "bg_red": "rgba(255, 0, 0, 0.05)"
+    "pos_bar": "#0000FF", "neg_bar": "#FFA500", "agg_line": "#3498db",
+    "flip_line": "#FF0000", "price_line": "#008000",
+    "bg_green": "rgba(0, 255, 0, 0.05)", "bg_red": "rgba(255, 0, 0, 0.05)"
 }
 
 CONFIG = {
-    "SPX": {
-        "label": "🇺🇸 ES / SPX (標普 500 期貨基準)",
-        "ticker": "^SPX", 
-        "basis": 17.4, 
-        "keywords": ["SPX", "ES"],
-        "width_bar": 2
-    },
-    "NQ": {
-        "label": "💻 NQ / NASDAQ 100 (那指期貨基準)",
-        "ticker": "^NDX", 
-        "basis": 57.6, 
-        "keywords": ["IUXX", "NQ"],
-        "width_bar": 20
-    }
+    "SPX": {"label": "🇺🇸 ES / SPX (標普 500)", "ticker": "^SPX", "basis": 17.4, "keywords": ["SPX", "ES"], "width_bar": 2},
+    "NQ": {"label": "💻 NQ / NASDAQ 100 (那指)", "ticker": "^NDX", "basis": 57.6, "keywords": ["IUXX", "NQ"], "width_bar": 20}
 }
 DATA_DIR = "data"
 
-# --- 2. 數據處理核心 ---
+# --- 2. 數據核心函數 ---
 
 @st.cache_data(ttl=60)
 def fetch_yahoo_kline(ticker, basis):
@@ -57,7 +41,10 @@ def fetch_yahoo_kline(ticker, basis):
         if df.empty: return None
         if df.columns.nlevels > 1:
             df.columns = df.columns.get_level_values(0)
-        return df + basis
+        df = df + basis
+        # 關鍵：將索引轉為字串格式，用於分類軸
+        df['time_label'] = df.index.strftime('%m-%d %H:%M')
+        return df
     except:
         return None
 
@@ -84,10 +71,10 @@ def get_safe_float(series):
     val = series.iloc[-1]
     return float(val.iloc[0]) if isinstance(val, pd.Series) else float(val)
 
-# --- 3. 繪圖組件 ---
+# --- 3. 繪圖組件 (互動式 Plotly) ---
 
 def draw_kline_profile(oi_df, symbol):
-    """圖 1: 5m 連續 K 線圖 + 水平 OI 牆"""
+    """圖 1: 完全連續的 5m K線 + 水平 OI 牆"""
     df_k = fetch_yahoo_kline(CONFIG[symbol]['ticker'], CONFIG[symbol]['basis'])
     if df_k is None: return
 
@@ -97,9 +84,10 @@ def draw_kline_profile(oi_df, symbol):
 
     fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.01, column_widths=[0.8, 0.2])
     
-    # K線
+    # K線：使用 'time_label' 作為 X 軸，並設定 type='category'
     fig.add_trace(go.Candlestick(
-        x=df_k.index, open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'], 
+        x=df_k['time_label'], 
+        open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'], 
         name="5m K線"
     ), row=1, col=1)
     
@@ -115,23 +103,26 @@ def draw_kline_profile(oi_df, symbol):
         hovertemplate="Strike: %{y}<br>Put OI: %{x:.1f}K"
     ), row=1, col=2)
 
-    fig.add_hline(y=last_p, line_dash="dash", line_color=COLORS['price_line'])
+    fig.add_hline(y=last_p, line_dash="dash", line_color=COLORS['price_line'], annotation_text=f"期貨現價:{last_p:,.1f}")
 
-    # --- 關鍵：讓 K 線圖連續 ---
-    # 過濾週末 (週六凌晨到週一凌晨) 以及 每天收盤後的空檔
+    # --- 核心設定：讓 K 線圖連續 ---
     fig.update_xaxes(
-        rangebreaks=[
-            dict(bounds=["sat", "mon"]), # 過濾週末
-            dict(bounds=[16, 9.5], pattern="hour"), # 過濾美股非正規交易時段 (16:00 - 09:30)
-        ],
+        type='category',  # 強制使用分類軸，消除時間空隙
+        nticks=20,        # 限制標籤數量避免過擠
         row=1, col=1
     )
 
-    fig.update_layout(height=700, template="plotly_white", showlegend=False, xaxis_rangeslider_visible=False)
+    fig.update_layout(
+        height=700, 
+        template="plotly_white", 
+        showlegend=False, 
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified"
+    )
     st.plotly_chart(fig, width='stretch')
 
 def draw_gex_main(gamma_df, symbol):
-    """圖 2: 淨 Gamma 曝險圖"""
+    """圖 2: 淨 Gamma 曝險圖 (Barchart 配色)"""
     df_k = fetch_yahoo_kline(CONFIG[symbol]['ticker'], CONFIG[symbol]['basis'])
     last_p = get_safe_float(df_k['Close']) if df_k is not None else 0
     
@@ -142,11 +133,11 @@ def draw_gex_main(gamma_df, symbol):
                              line=dict(color=COLORS['agg_line'], width=4)), secondary_y=True)
     
     fig.add_vline(x=last_p, line_color=COLORS['price_line'], line_dash="dash")
-    fig.update_layout(title=f"<b>{symbol} 淨 Gamma 曝險</b>", height=500, template="plotly_white", hovermode="x unified")
+    fig.update_layout(title=f"<b>{symbol} 淨 Gamma 曝險</b>", height=500, template="plotly_white")
     st.plotly_chart(fig, width='stretch')
 
 def draw_details(df, symbol, mode="Gamma"):
-    """圖 3 & 4: 買賣權細節對比"""
+    """圖 3 & 4: 買賣權對比"""
     scale = 1e8 if mode == "Gamma" else 1e3
     col_c = "Call Gamma Exposure" if mode == "Gamma" else "Call Open Interest"
     col_p = "Put Gamma Exposure" if mode == "Gamma" else "Put Open Interest"
@@ -158,7 +149,7 @@ def draw_details(df, symbol, mode="Gamma"):
 
 # --- 4. 主程式執行 ---
 
-st.markdown("<h1 style='text-align: center;'>🎯 ES & NQ 連續 K 線監控系統</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>🎯 ES & NQ 連續無空隙 K 線監控系統</h1>", unsafe_allow_html=True)
 
 for asset in ["SPX", "NQ"]:
     st.markdown(f"---")
@@ -172,3 +163,5 @@ for asset in ["SPX", "NQ"]:
         draw_gex_main(df_vol, asset)
         draw_details(df_oi, asset, mode="Gamma")
         draw_details(df_oi, asset, mode="Open Interest")
+    else:
+        st.error(f"❌ 找不到 {asset} 的 CSV 檔案")
