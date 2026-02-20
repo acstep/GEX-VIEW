@@ -27,8 +27,8 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 CONFIG = {
-    "SPX": {"label": "🇺🇸 ES / SPX (標普 500)", "ticker": "^SPX", "offset": 17.4, "keywords": ["SPX", "ES"]},
-    "NQ": {"label": "💻 NQ / NASDAQ 100 (那指)", "ticker": "^NDX", "offset": 57.6, "keywords": ["IUXX", "NQ"]}
+    "SPX": {"label": "🇺🇸 ES / SPX (標普 500)", "ticker": "^SPX", "offset": 17.4, "keywords": ["SPX", "ES"], "default_width": 5},
+    "NQ": {"label": "💻 NQ / NASDAQ 100 (那指)", "ticker": "^NDX", "offset": 57.6, "keywords": ["IUXX", "NQ"], "default_width": 25}
 }
 DATA_DIR = "data"
 loaded_log = []
@@ -73,42 +73,58 @@ def clean_csv(filepath, offset):
     df['Adjusted_Strike'] = df['Strike'] + offset
     return df
 
-# --- 3. 繪圖組件 (K線優化版) ---
+# --- 3. 繪圖組件 (修復 Width 錯誤與自然視覺) ---
 
 def draw_chart_1_kline(df_k, df_oi, symbol):
-    """圖 1: 自然視覺 K 線圖 + 自動聚焦籌碼區間"""
+    """圖 1: 自然視覺 K 線圖 + 安全寬度處理"""
     last_p = df_k['Close'].iloc[-1]
     
-    # 找出籌碼密集區間
+    # 找出籌碼密集區間 (Call/Put Wall)
     cw_idx = df_oi['Call Open Interest'].idxmax()
     pw_idx = df_oi['Put Open Interest'].idxmax()
     wall_min = min(df_oi.loc[cw_idx, 'Adjusted_Strike'], df_oi.loc[pw_idx, 'Adjusted_Strike'])
     wall_max = max(df_oi.loc[cw_idx, 'Adjusted_Strike'], df_oi.loc[pw_idx, 'Adjusted_Strike'])
     
-    margin_val = (wall_max - wall_min) * 0.15  # 上下留 15% 呼吸空間
+    margin_val = (wall_max - wall_min) * 0.2
+    if margin_val <= 0: margin_val = 100
+    
     y_min, y_max = wall_min - margin_val, wall_max + margin_val
-    
     oi_v = df_oi[(df_oi['Adjusted_Strike'] >= y_min) & (df_oi['Adjusted_Strike'] <= y_max)]
-    bar_w = (oi_v['Adjusted_Strike'].diff().median() if not oi_v.empty else 5) * 0.7
-    
+
+    # --- 關鍵修正：確保 bar_w 永遠是有效數字 ---
+    diff = oi_v['Adjusted_Strike'].diff().median()
+    if pd.isna(diff) or diff <= 0:
+        bar_w = CONFIG[symbol]['default_width']
+    else:
+        bar_w = diff * 0.75
+
     fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.01, column_widths=[0.82, 0.18])
     
-    # 1. 優化後的 K線圖
+    # 1. 自然視覺 K線圖 (Candlestick)
     fig.add_trace(go.Candlestick(
         x=df_k['time_label'], 
         open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'],
-        increasing_line_color='#26A69A', decreasing_line_color='#EF5350', # 專業看盤配色
+        increasing_line_color='#26A69A', decreasing_line_color='#EF5350',
         increasing_fillcolor='#26A69A', decreasing_fillcolor='#EF5350',
-        line_width=1.2, name="K線"
+        line_width=1, name="K線"
     ), row=1, col=1)
     
-    # 2. OI 牆
-    fig.add_trace(go.Bar(y=oi_v['Adjusted_Strike'], x=oi_v['Call Open Interest']/1e3, orientation='h', marker_color="#0000FF", width=bar_w, hovertemplate="點數: %{y}<br>Call OI: %{x:.1f}K"), row=1, col=2)
-    fig.add_trace(go.Bar(y=oi_v['Adjusted_Strike'], x=-oi_v['Put Open Interest']/1e3, orientation='h', marker_color="#FFA500", width=bar_w, hovertemplate="點數: %{y}<br>Put OI: %{x:.1f}K"), row=1, col=2)
+    # 2. OI 牆 (使用安全寬度)
+    fig.add_trace(go.Bar(
+        y=oi_v['Adjusted_Strike'], x=oi_v['Call Open Interest']/1e3, 
+        orientation='h', marker_color="#0000FF", width=bar_w, 
+        name="Call OI", hovertemplate="點數: %{y}<br>Call OI: %{x:.1f}K"
+    ), row=1, col=2)
+    
+    fig.add_trace(go.Bar(
+        y=oi_v['Adjusted_Strike'], x=-oi_v['Put Open Interest']/1e3, 
+        orientation='h', marker_color="#FFA500", width=bar_w, 
+        name="Put OI", hovertemplate="點數: %{y}<br>Put OI: %{x:.1f}K"
+    ), row=1, col=2)
     
     total_bars = len(df_k)
-    # 預設縮放至最近 300 根 (約 3-4 個交易日)，視覺最自然
-    fig.update_xaxes(type='category', nticks=12, range=[total_bars-300, total_bars-1], row=1, col=1)
+    # 預設顯示最近 250 根 K 線，視覺比例最自然
+    fig.update_xaxes(type='category', nticks=12, range=[max(0, total_bars-250), total_bars-1], row=1, col=1)
     fig.update_yaxes(range=[y_min, y_max], gridcolor='#E1E1E1', row=1, col=1)
 
     fig.update_layout(
@@ -124,7 +140,8 @@ def draw_chart_1_kline(df_k, df_oi, symbol):
 # ----------------- 其餘繪圖函數保持不變 -----------------
 
 def draw_chart_2_gex(df_vol, last_p, symbol):
-    bar_w = (df_vol['Adjusted_Strike'].diff().median() if not df_vol.empty else 5) * 0.7
+    diff = df_vol['Adjusted_Strike'].diff().median()
+    bar_w = (diff if not pd.isna(diff) and diff > 0 else CONFIG[symbol]['default_width']) * 0.8
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(go.Bar(x=df_vol['Adjusted_Strike'], y=df_vol['Net Gamma Exposure']/1e8, marker_color=np.where(df_vol['Net Gamma Exposure']>=0, "#0000FF", "#FFA500"), width=bar_w, hovertemplate="點數: %{x}<br>淨GEX: %{y:.2f}億"), secondary_y=False)
     fig.add_trace(go.Scatter(x=df_vol['Adjusted_Strike'], y=df_vol['Gamma Exposure Profile']/1e9, line=dict(color="#3498db", width=4), hovertemplate="點數: %{x}<br>累計: %{y:.2f}B"), secondary_y=True)
@@ -137,7 +154,8 @@ def draw_chart_3_details(df_oi, last_p, symbol, mode="Gamma"):
     unit = "億" if mode == "Gamma" else "K"
     col_c = f"Call {mode} Exposure" if mode == "Gamma" else "Call Open Interest"
     col_p = f"Put {mode} Exposure" if mode == "Gamma" else "Put Open Interest"
-    bar_w = (df_oi['Adjusted_Strike'].diff().median() if not df_oi.empty else 5) * 0.7
+    diff = df_oi['Adjusted_Strike'].diff().median()
+    bar_w = (diff if not pd.isna(diff) and diff > 0 else CONFIG[symbol]['default_width']) * 0.8
     fig = go.Figure()
     fig.add_trace(go.Bar(x=df_oi['Adjusted_Strike'], y=df_oi[col_c]/scale, name="Call", marker_color="#0000FF", width=bar_w, hovertemplate=f"點數: %{{x}}<br>Call {mode}: %{{y:.2f}}{unit}"))
     fig.add_trace(go.Bar(x=df_oi['Adjusted_Strike'], y=df_oi[col_p]/scale if mode=="Gamma" else -df_oi[col_p]/scale, name="Put", marker_color="#FFA500", width=bar_w, hovertemplate=f"點數: %{{x}}<br>Put {mode}: %{{y:.2f}}{unit}"))
