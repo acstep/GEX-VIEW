@@ -6,9 +6,10 @@ import glob
 import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from datetime import datetime  # <-- 補上這個關鍵引用
 
 # --- 1. 頁面基本設定 ---
-st.set_page_config(page_title="ES & NQ 籌碼監控 (數據溯源版)", layout="wide")
+st.set_page_config(page_title="ES & NQ 籌碼監控系統", layout="wide")
 
 st.markdown("""
     <style>
@@ -18,7 +19,6 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 專業配色
 COLORS = {
     "pos_bar": "#0000FF", "neg_bar": "#FFA500", "agg_line": "#3498db",
     "flip_line": "#FF0000", "price_line": "#008000",
@@ -31,36 +31,32 @@ CONFIG = {
 }
 DATA_DIR = "data"
 
-# 用於追蹤本次讀取的實體檔案路徑
-session_used_files = []
+# 用於紀錄本次執行的實體檔案清單
+session_files = []
 
-# --- 2. 數據核心函數 (修正選取邏輯) ---
+# --- 2. 數據處理核心 (自動識別最新版本) ---
 
-def get_latest_version_files(keywords):
+def get_latest_files(keywords):
     """
-    自動選取檔名序號最大 (-2 > -1) 或修改時間最晚的檔案
+    識別序號最大 (如 -2 > -1) 或修改時間最晚的檔案
     """
     if not os.path.exists(DATA_DIR): return None, None
     all_files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
-    
-    # 篩選符合資產關鍵字的檔案
     symbol_files = [f for f in all_files if any(k.upper() in os.path.basename(f).upper() for k in keywords)]
     if not symbol_files: return None, None
     
-    # 分類
     oi_files = [f for f in symbol_files if "open-interest" in f.lower()]
     vol_files = [f for f in symbol_files if "open-interest" not in f.lower()]
     
-    def pick_final(file_list):
+    def pick_latest(file_list):
         if not file_list: return None
-        # 關鍵排序：檔名升序 (讓 -2 排在 -1 後) + 修改時間
-        # 這樣 sorted 完後最後一個索引 [-1] 就是我們要的
-        sorted_files = sorted(file_list, key=lambda x: (x, os.path.getmtime(x)))
-        latest = sorted_files[-1]
-        if latest not in session_used_files: session_used_files.append(latest)
+        # 排序邏輯：優先檔名排序 (處理 -2)，再依時間排序
+        sorted_list = sorted(file_list, key=lambda x: (x, os.path.getmtime(x)))
+        latest = sorted_list[-1]
+        if latest not in session_files: session_files.append(latest)
         return latest
 
-    return pick_final(oi_files), pick_final(vol_files)
+    return pick_latest(oi_files), pick_latest(vol_files)
 
 @st.cache_data(ttl=60)
 def fetch_yahoo_kline(ticker, basis):
@@ -86,7 +82,7 @@ def get_safe_float(series):
     val = series.iloc[-1]
     return float(val.iloc[0]) if isinstance(val, pd.Series) else float(val)
 
-# --- 3. 繪圖組件 (全 TIP 點位強化) ---
+# --- 3. 繪圖組件 (全互動與點位 TIP) ---
 
 def draw_kline_profile(oi_df, symbol):
     df_k = fetch_yahoo_kline(CONFIG[symbol]['ticker'], CONFIG[symbol]['basis'])
@@ -100,7 +96,6 @@ def draw_kline_profile(oi_df, symbol):
     fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.01, column_widths=[0.8, 0.2])
     fig.add_trace(go.Candlestick(x=df_k['time_label'], open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'], name="K線"), row=1, col=1)
     
-    # TIP 強化：顯示履約點數
     fig.add_trace(go.Bar(y=oi_v['Strike_Fut'], x=oi_v['Call Open Interest']/1e3, orientation='h', name="Call OI", 
                          marker_color=COLORS['pos_bar'], width=bar_w,
                          hovertemplate="<b>履約點數: %{y}</b><br>看漲 OI: %{x:.2f} K口<extra></extra>"), row=1, col=2)
@@ -128,7 +123,7 @@ def draw_gex_main(gamma_df, symbol):
                              hovertemplate="<b>價格點數: %{x}</b><br>總曝險: %{y:.2f} B<extra></extra>"), secondary_y=True)
     
     fig.add_vline(x=last_p, line_color=COLORS['price_line'], line_dash="dash")
-    fig.update_layout(title=f"<b>{symbol} 淨 Gamma 曝險與累計曲線</b>", height=500, template="plotly_white", hovermode="x unified")
+    fig.update_layout(title=f"<b>{symbol} 淨 Gamma 分佈與累計曲線</b>", height=500, template="plotly_white", hovermode="x unified")
     st.plotly_chart(fig, width='stretch')
 
 def draw_details(df, symbol, mode="Gamma"):
@@ -146,34 +141,32 @@ def draw_details(df, symbol, mode="Gamma"):
     fig.update_layout(title=f"{symbol} {mode} 細節對比", height=400, barmode='relative', template="plotly_white", hovermode="x unified")
     st.plotly_chart(fig, width='stretch')
 
-# --- 4. 主程式執行 ---
+# --- 4. 主介面執行 ---
 
-st.markdown("<h1 style='text-align: center;'>🎯 ES & NQ 真實籌碼監控系統 (自動識別最新版本)</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>🎯 ES & NQ 真實籌碼即時監控系統</h1>", unsafe_allow_html=True)
 
 for asset in ["SPX", "NQ"]:
     st.markdown(f"---")
     st.markdown(f"## {CONFIG[asset]['label']}")
-    oi_f, vol_f = get_latest_version_files(CONFIG[asset]['keywords'])
+    oi_f, vol_f = get_latest_files(CONFIG[asset]['keywords'])
     
     if oi_f and vol_f:
         df_oi = clean_csv(oi_f, CONFIG[asset]['basis'])
         df_vol = clean_csv(vol_f, CONFIG[asset]['basis'])
-        
-        # 繪製圖表
         draw_kline_profile(df_oi, asset)
         draw_gex_main(df_vol, asset)
         draw_details(df_oi, asset, mode="Gamma")
         draw_details(df_oi, asset, mode="Open Interest")
     else:
-        st.error(f"❌ 找不到 {asset} 的數據檔案，請確認 data 資料夾是否有正確 CSV 檔案")
+        st.error(f"❌ 找不到 {asset} 的數據檔案")
 
-# --- 5. 數據溯源明細 (您要求的新增功能) ---
+# --- 5. 底部數據源資訊 ---
 st.markdown("<br><br>", unsafe_allow_html=True)
-if session_used_files:
+if session_files:
     st.markdown("### 📂 本次分析數據源明細：")
     files_html = "<div class='file-card'><ul>"
-    # 按字母排序顯示，讓清單整齊
-    for f in sorted(list(set(session_used_files))):
+    # 按字母排序，確保顯示整齊
+    for f in sorted(list(set(session_files))):
         fname = os.path.basename(f)
         mtime = datetime.fromtimestamp(os.path.getmtime(f)).strftime('%Y-%m-%d %H:%M:%S')
         files_html += f"<li><b>{fname}</b> <span style='color:gray; font-size:0.8em;'>(更新時間: {mtime})</span></li>"
