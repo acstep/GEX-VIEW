@@ -1,34 +1,41 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 import os
 import glob
 import re
 import yfinance as yf
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime
 
 # --- 1. 頁面設定 ---
-st.set_page_config(page_title="專業級 GEX 數據分析系統", layout="wide")
+st.set_page_config(page_title="ES & NQ 60日監控系統", layout="wide")
 
 st.markdown("""
     <style>
     .stApp { background-color: #F0F8FF; }
     .stMarkdown h2 { color: #001F3F; border-bottom: 3px solid #001F3F; padding-bottom: 10px; margin-top: 50px; }
+    .metric-card { text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); }
     </style>
     """, unsafe_allow_html=True)
 
-DATA_DIR = "data"
 CONFIG = {
-    "SPX": {"label": "ES (SPX Basis)", "prefix": "spx", "offset": 17.4, "price_range": 200, "width_bar": 2.0, "keywords": ["SPX", "ES"]},
-    "NQ": {"label": "NQ (NDX Basis)", "prefix": "ndx", "offset": 57.6, "price_range": 600, "width_bar": 25.0, "keywords": ["IUXX", "NQ"], "is_ndx": True}
+    "SPX": {
+        "label": "ES / SPX (標普 500)", "ticker": "^SPX", "offset": 17.4,
+        "call_color": "#008000", "put_color": "#B22222", "keywords": ["SPX", "ES"]
+    },
+    "NQ": {
+        "label": "NQ / NASDAQ 100 (那指)", "ticker": "^NDX", "offset": 57.6,
+        "call_color": "#000080", "put_color": "#FF4500", "keywords": ["IUXX", "NQ"]
+    }
 }
+DATA_DIR = "data"
 
-# --- 2. 核心邏輯：修正後的讀檔與現價抓取 ---
+# --- 2. 數據核心函數 ---
 
 def get_latest_files(symbol_keywords):
-    """正則識別邏輯：日期 > 版本號 > 時間"""
+    """正則識別最新檔案邏輯"""
     if not os.path.exists(DATA_DIR): return None, None
     all_files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
     symbol_files = [f for f in all_files if any(k.upper() in os.path.basename(f).upper() for k in symbol_keywords)]
@@ -42,118 +49,104 @@ def get_latest_files(symbol_keywords):
         suffix_val = int(suffix_match.group(1)) if suffix_match else 0
         return (date_str, suffix_val, os.path.getmtime(f))
 
-    oi_files = [f for f in symbol_files if "open-interest" in f.lower()]
-    vol_files = [f for f in symbol_files if "open-interest" not in f.lower()]
-    return (max(oi_files, key=get_sort_key) if oi_files else None, 
-            max(vol_files, key=get_sort_key) if vol_files else None)
+    oi_f = [f for f in symbol_files if "open-interest" in f.lower()]
+    vol_f = [f for f in symbol_files if "open-interest" not in f.lower()]
+    return (max(oi_f, key=get_sort_key) if oi_f else None, 
+            max(vol_f, key=get_sort_key) if vol_f else None)
 
-def get_safe_price(ticker):
-    """修正 MultiIndex 問題，安全抓取最新收盤價"""
+@st.cache_data(ttl=300)
+def fetch_60d_5m_kline(ticker, offset):
+    """抓取 Yahoo 5分鐘線的 60 天極限數據"""
     try:
-        df = yf.download(ticker, period="1d", progress=False)
+        # 5m 數據在 Yahoo 最多只能抓 60 天
+        df = yf.download(ticker, period="60d", interval="5m", progress=False)
         if df.empty: return None
-        # 如果是 MultiIndex，只取第一層的 Close
         if isinstance(df.columns, pd.MultiIndex):
-            price_series = df['Close'].iloc[:, 0]
-        else:
-            price_series = df['Close']
-        return float(price_series.iloc[-1])
+            df.columns = df.columns.get_level_values(0)
+        df = df + offset
+        # 建立連續標籤
+        df['time_label'] = df.index.strftime('%m-%d %H:%M')
+        return df
     except:
         return None
 
-def load_cleaned_csv(filename):
-    df = pd.read_csv(filename)
-    for col in df.columns:
-        if df[col].dtype == 'object':
+def clean_data(filepath, offset):
+    df = pd.read_csv(filepath)
+    for col in ['Strike', 'Call Open Interest', 'Put Open Interest', 'Net Gamma Exposure']:
+        if col in df.columns:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce')
+    df = df.dropna(subset=['Strike']).sort_values('Strike')
+    df['Adjusted_Strike'] = df['Strike'] + offset
     return df
 
-# --- 3. 繪圖組件 (完全維持 Matplotlib 原始風格) ---
+# --- 3. 繪圖組件 ---
 
-def generate_kline_oi_chart(oi_file, current_price, price_range, prefix, title, width_bar, is_ndx=False):
-    np.random.seed(42 if is_ndx else 100)
-    dates = pd.date_range(end=pd.Timestamp.now(), periods=100, freq='15min')
-    vol = 15 if is_ndx else 2
-    path = np.cumsum(np.random.normal(0, vol, 100)) + current_price
-    df = pd.DataFrame({'Close': path}, index=dates)
-    df['Open'] = df['Close'].shift(1).fillna(path[0])
-    df['High'] = df[['Open', 'Close']].max(axis=1) + vol/2
-    df['Low'] = df[['Open', 'Close']].min(axis=1) - vol/2
-
-    df_oi = load_cleaned_csv(oi_file).dropna(subset=['Call Open Interest', 'Strike'])
-    df_oi['Strike_Fut'] = df_oi['Strike'] + (57.6 if is_ndx else 17.4)
-    y_min, y_max = current_price - price_range, current_price + price_range
-    df_oi_v = df_oi[(df_oi['Strike_Fut'] >= y_min) & (df_oi['Strike_Fut'] <= y_max)]
-
-    fig, (ax_p, ax_oi) = plt.subplots(1, 2, figsize=(14, 6), gridspec_kw={'width_ratios': [3, 1], 'wspace': 0.05}, sharey=True)
+def draw_60d_kline(df_k, df_oi, symbol):
+    """繪製 60 天連續 5m K 線與 OI 牆"""
+    last_p = df_k['Close'].iloc[-1]
+    y_range = 150 if symbol == "SPX" else 450
+    oi_v = df_oi[(df_oi['Adjusted_Strike'] >= last_p - y_range) & (df_oi['Adjusted_Strike'] <= last_p + y_range)]
     
-    # 畫K線
-    up = df[df['Close']>=df['Open']]; down = df[df['Close']<df['Open']]
-    ax_p.bar(up.index, up['Close']-up['Open'], bottom=up['Open'], color='green', width=0.005)
-    ax_p.bar(down.index, down['Open']-down['Close'], bottom=down['Close'], color='red', width=0.005)
-    ax_p.vlines(df.index, df['Low'], df['High'], color='black', linewidth=0.5)
-    ax_p.axhline(current_price, color='blue', linestyle='--', linewidth=1.5)
-    ax_p.set_title(f'{title} - Price Action & OI Profile', fontweight='bold')
+    # 計算適當柱狀寬度
+    diff = oi_v['Adjusted_Strike'].diff().median()
+    bar_w = (diff if not pd.isna(diff) else 5) * 0.7
 
-    # 畫OI牆
-    ax_oi.barh(df_oi_v['Strike_Fut'], df_oi_v['Call Open Interest']/1e3, color='blue', height=width_bar, label='Call OI')
-    ax_oi.barh(df_oi_v['Strike_Fut'], -df_oi_v['Put Open Interest']/1e3, color='orange', height=width_bar, label='Put OI')
-    ax_oi.axhline(current_price, color='blue', linestyle='--')
-    ax_oi.legend(loc='upper right')
+    fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.01, column_widths=[0.85, 0.15])
     
-    st.pyplot(fig)
-
-def plot_3_charts(gamma_file, oi_file, last_price, prefix, title_prefix, width_bar, offset):
-    df_g = load_cleaned_csv(gamma_file).dropna(subset=['Net Gamma Exposure', 'Strike'])
-    df_oi = load_cleaned_csv(oi_file).dropna(subset=['Call Open Interest', 'Strike'])
-    df_g['Strike_Fut'] = df_g['Strike'] + offset
-    df_oi['Strike_Fut'] = df_oi['Strike'] + offset
+    # 5m K線 (Category 軸確保連續)
+    fig.add_trace(go.Candlestick(
+        x=df_k['time_label'], open=df_k['Open'], high=df_k['High'], 
+        low=df_k['Low'], close=df_k['Close'], name="60日 5m K線"
+    ), row=1, col=1)
     
-    # Chart 1: Net Gamma
-    fig1, ax1 = plt.subplots(figsize=(12, 5))
-    net_gex = df_g['Net Gamma Exposure'] / 1e8
-    ax1.bar(df_g['Strike_Fut'], net_gex, color=['blue' if x >= 0 else 'orange' for x in net_gex], width=width_bar)
-    ax2 = ax1.twinx()
-    ax2.plot(df_g['Strike_Fut'], df_g['Gamma Exposure Profile']/1e9, color='#3498db', linewidth=3)
-    ax1.axvline(last_price, color='green', linestyle='-')
-    ax1.set_title(f'{title_prefix} - Total Net Gamma')
-    st.pyplot(fig1)
+    # OI 水平牆
+    fig.add_trace(go.Bar(
+        y=oi_v['Adjusted_Strike'], x=oi_v['Call Open Interest']/1e3, orientation='h', 
+        marker_color=CONFIG[symbol]['call_color'], width=bar_w, name="Call OI",
+        hovertemplate="<b>點數: %{y}</b><br>Call OI: %{x:.2f}K<extra></extra>"
+    ), row=1, col=2)
+    
+    fig.add_trace(go.Bar(
+        y=oi_v['Adjusted_Strike'], x=-oi_v['Put Open Interest']/1e3, orientation='h', 
+        marker_color=CONFIG[symbol]['put_color'], width=bar_w, name="Put OI",
+        hovertemplate="<b>點數: %{y}</b><br>Put OI: %{x:.2f}K<extra></extra>"
+    ), row=1, col=2)
 
-    # Chart 2: Call vs Put Gamma
-    fig2, ax3 = plt.subplots(figsize=(12, 4))
-    ax3.bar(df_oi['Strike_Fut'], df_oi['Call Gamma Exposure']/1e8, color='blue', width=width_bar)
-    ax3.bar(df_oi['Strike_Fut'], df_oi['Put Gamma Exposure']/1e8, color='orange', width=width_bar)
-    ax3.set_title(f'{title_prefix} - Call vs Put Gamma')
-    st.pyplot(fig2)
-
-    # Chart 3: OI Distribution
-    fig3, ax4 = plt.subplots(figsize=(12, 4))
-    ax4.bar(df_oi['Strike_Fut'], df_oi['Call Open Interest']/1e3, color='blue', width=width_bar)
-    ax4.bar(df_oi['Strike_Fut'], -df_oi['Put Open Interest']/1e3, color='orange', width=width_bar)
-    ax4.set_title(f'{title_prefix} - OI Distribution')
-    st.pyplot(fig3)
+    fig.add_hline(y=last_p, line_dash="dash", line_color="#008000", annotation_text="現價")
+    
+    # 設定 X 軸為分類軸並預設縮放到最近 2 天 (使用者可自行縮放回 60 天)
+    total_bars = len(df_k)
+    fig.update_xaxes(type='category', nticks=20, range=[total_bars-300, total_bars-1], row=1, col=1)
+    
+    fig.update_layout(height=800, template="plotly_white", showlegend=False, xaxis_rangeslider_visible=False, hovermode="x unified")
+    st.plotly_chart(fig, use_container_width=True)
 
 # --- 4. 主程式 ---
 
-st.markdown("<h1 style='text-align: center;'>🎯 專業級 ES & NQ 數據分析系統</h1>", unsafe_allow_html=True)
-
-# 安全抓取價格
-spx_raw = get_safe_price("^SPX")
-ndx_raw = get_safe_price("^NDX")
+st.markdown("<h1 style='text-align: center;'>🎯 ES & NQ 60日連續 5m 數據監控</h1>", unsafe_allow_html=True)
 
 for symbol in ["SPX", "NQ"]:
-    st.markdown(f"---")
-    st.markdown(f"## 📊 {CONFIG[symbol]['label']}")
+    st.markdown(f"## 📈 {CONFIG[symbol]['label']}")
     oi_f, vol_f = get_latest_files(CONFIG[symbol]['keywords'])
     
-    if oi_f and vol_f:
-        raw_price = ndx_raw if symbol == "NQ" else spx_raw
-        if raw_price:
-            current_price = raw_price + CONFIG[symbol]['offset']
-            # 輸出 4 張圖
-            generate_kline_oi_chart(oi_f, current_price, CONFIG[symbol]['price_range'], CONFIG[symbol]['prefix'], CONFIG[symbol]['label'], CONFIG[symbol]['width_bar'], symbol=="NQ")
-            plot_3_charts(vol_f, oi_f, current_price, CONFIG[symbol]['prefix'], CONFIG[symbol]['label'], CONFIG[symbol]['width_bar'], CONFIG[symbol]['offset'])
+    if oi_f:
+        df_oi = clean_data(oi_f, CONFIG[symbol]['offset'])
+        df_k = fetch_60d_5m_kline(CONFIG[symbol]['ticker'], CONFIG[symbol]['offset'])
+        
+        if df_k is not None:
+            # 顯示關鍵點位卡片
+            cw_val = df_oi.loc[df_oi['Call Open Interest'].idxmax(), 'Adjusted_Strike']
+            pw_val = df_oi.loc[df_oi['Put Open Interest'].idxmax(), 'Adjusted_Strike']
+            
+            c1, c2, c3 = st.columns(3)
+            with c1: st.markdown(f"<div class='metric-card'>目前現價<br><b style='font-size:30px;'>{df_k['Close'].iloc[-1]:.2f}</b></div>", unsafe_allow_html=True)
+            with c2: st.markdown(f"<div class='metric-card'>買權牆 (Call Wall)<br><b style='font-size:30px; color:green;'>{cw_val:.0f}</b></div>", unsafe_allow_html=True)
+            with c3: st.markdown(f"<div class='metric-card'>賣權牆 (Put Wall)<br><b style='font-size:30px; color:red;'>{pw_val:.0f}</b></div>", unsafe_allow_html=True)
+            
+            # 繪圖
+            draw_60d_kline(df_k, df_oi, symbol)
+            st.divider()
+        else:
+            st.warning(f"正在載入 {symbol} 的 60 天數據中，請稍候...")
     else:
         st.error(f"❌ 找不到 {symbol} 的數據檔案")
-
-st.info(f"📂 數據說明：已採用最新正則規則自動匹配檔案。")
