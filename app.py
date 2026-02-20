@@ -18,13 +18,14 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 組態與配色 (淺色背景優化版)
+# 組態與配色 (優化柱狀圖寬度)
 CONFIG = {
     "SPX": {
         "label": "ES / SPX (標普 500)",
         "offset": 0,
         "call_color": "#008000", # 深綠色
         "put_color": "#B22222",  # 深紅色
+        "bar_width": 4,          # SPX 間距通常是 5，設為 4 看起來較粗
         "keywords": ["SPX", "ES"]
     },
     "NQ": {
@@ -32,6 +33,7 @@ CONFIG = {
         "offset": 75,
         "call_color": "#000080", # 深藍色
         "put_color": "#FF4500",  # 橘紅色
+        "bar_width": 20,         # NQ 間距通常是 25，設為 20 看起來較粗
         "keywords": ["IUXX", "NQ"]
     }
 }
@@ -63,7 +65,6 @@ def clean_data(df, offset):
             df[col] = pd.to_numeric(df[col], errors='coerce')
     df = df.dropna(subset=['Strike']).sort_values('Strike')
     df['Adjusted_Strike'] = df['Strike'] + offset
-    # 將 Gamma 曝險金額轉換為「億」(10^8)
     if 'Net Gamma Exposure' in df.columns:
         df['Net_GEX_Yi'] = df['Net Gamma Exposure'] / 1e8
     return df
@@ -88,25 +89,27 @@ def create_vivid_plot(df_oi, df_vol, symbol):
     
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # 1. 看漲 OI (Call)
+    # 1. 看漲 OI (Call) - 增加 width
     fig.add_trace(go.Bar(
         x=df_oi['Adjusted_Strike'], y=df_oi['Call Open Interest'],
         name='看漲 (Call) OI', 
         marker=dict(color=conf['call_color'], line=dict(width=1, color='white')),
         opacity=0.6,
+        width=conf['bar_width'],
         hovertemplate='<b>價格: %{x}</b><br>看漲口數: %{y:,.0f}<extra></extra>'
     ), secondary_y=False)
 
-    # 2. 看跌 OI (Put)
+    # 2. 看跌 OI (Put) - 增加 width
     fig.add_trace(go.Bar(
         x=df_oi['Adjusted_Strike'], y=-df_oi['Put Open Interest'],
         name='看跌 (Put) OI', 
         marker=dict(color=conf['put_color'], line=dict(width=1, color='white')),
         opacity=0.6,
+        width=conf['bar_width'],
         hovertemplate='看跌口數: %{y:,.0f}<extra></extra>'
     ), secondary_y=False)
 
-    # 3. 淨 Gamma 曲線 (深藍色加粗)
+    # 3. 淨 Gamma 曲線
     fig.add_trace(go.Scatter(
         x=df_oi['Adjusted_Strike'], y=df_oi['Net_GEX_Yi'],
         name='淨 GEX (億)', 
@@ -128,7 +131,6 @@ def create_vivid_plot(df_oi, df_vol, symbol):
     if pw: fig.add_vline(x=pw, line_dash="dash", line_color="red", line_width=3, annotation_text=f"賣權牆: {pw:.0f}", annotation_font=line_font)
     if v_flip: fig.add_vline(x=v_flip, line_width=4, line_color="black", annotation_text=f"轉折: {v_flip:.0f}", annotation_font=line_font)
 
-    # --- Layout 設定 ---
     fig.update_layout(
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='#F0F8FF',
@@ -152,16 +154,14 @@ def create_vivid_plot(df_oi, df_vol, symbol):
             overlaying='y', side='right', showgrid=False
         ),
         hoverlabel=dict(
-            bgcolor="#001F3F",
-            font_size=20,
-            font_color="white",
-            font_family="Arial Black"
+            bgcolor="#001F3F", font_size=20, font_color="white", font_family="Arial Black"
         ),
         legend=dict(
             orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
             font=dict(size=18, color='black')
         ),
-        margin=dict(l=80, r=80, t=120, b=80)
+        margin=dict(l=80, r=80, t=120, b=80),
+        bargap=0.05
     )
     
     return fig
@@ -183,7 +183,6 @@ else:
             cw, pw, _ = get_levels(df_oi)
             _, _, v_flip = get_levels(df_vol)
 
-            # 頂部指標看板
             c1, c2, c3 = st.columns(3)
             with c1: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>多空分界 (Pivot)<br><b style='font-size:35px; color:black;'>{v_flip:.0f}</b></div>", unsafe_allow_html=True)
             with c2: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>買權牆 (Call Wall)<br><b style='font-size:35px; color:green;'>{cw:.0f}</b></div>", unsafe_allow_html=True)
@@ -192,16 +191,12 @@ else:
             st.plotly_chart(create_vivid_plot(df_oi, df_vol, symbol), use_container_width=True)
             st.divider()
 
-# --- 底部解讀說明 ---
 with st.expander("📖 數據解讀說明 (GEX 概念指南)", expanded=True):
     st.markdown("""
     ### 🔵 淨 GEX (Net Gamma Exposure) —— 「結構性資金」
     * **計算來源**：依據 **未平倉合約 (Open Interest, OI)**。
-    * **單位解讀**：這是目前市場上所有「留過夜」的倉位所累積的總曝險金額。它代表了市場的底層結構，反映的是大戶、法人長線佈局的資金實力。
-    * **例子**：如果 6900 點的淨 GEX 是 10 億美元，代表指數每跌 1%，做市商在該價位附近可能需要賣出價值 10 億美元的部位來對沖（如果是負 Gamma 區）。
-
+    * **單位解讀**：這是目前市場上所有「留過夜」的倉位所累積的總曝險金額。
     ### 🟠 波動 GEX (Vol Gamma Exposure) —— 「動態資金」
     * **計算來源**：依據 **當日成交量 (Volume)**。
-    * **單位解讀**：這是 **「今天正在發生」** 的資金曝險。它代表的是日內交易者、當沖客或剛進場的熱錢。
-    * **例子**：如果波動 GEX 突然飆升，即使淨 GEX 沒變，也代表當下有大量資金正在特定價位進行博弈，是極其敏感的短線訊號。
+    * **單位解讀**：這是 **「今天正在發生」** 的資金曝險。
     """, unsafe_allow_html=True)
