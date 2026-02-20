@@ -10,12 +10,18 @@ from plotly.subplots import make_subplots
 from datetime import datetime
 
 # --- 1. 頁面基本設定 ---
-st.set_page_config(page_title="ES & NQ 籌碼點位精確監控", layout="wide")
+st.set_page_config(page_title="ES & NQ 15m 籌碼點位監控", layout="wide")
 
 st.markdown("""
     <style>
     .stApp { background-color: #F0F8FF; }
-    .stMarkdown h2 { color: #001F3F; border-bottom: 3px solid #001F3F; padding-bottom: 5px; margin-top: 10px; margin-bottom: 5px; }
+    .stMarkdown h2 { 
+        color: #001F3F; 
+        border-bottom: 3px solid #001F3F; 
+        padding-bottom: 5px; 
+        margin-top: 10px; 
+        margin-bottom: 5px; 
+    }
     .block-container { padding-top: 2rem; padding-bottom: 1rem; }
     </style>
     """, unsafe_allow_html=True)
@@ -47,12 +53,12 @@ def get_latest_files(symbol_keywords):
     return (max(oi_f, key=get_sort_key) if oi_f else None, max(vol_f, key=get_sort_key) if vol_f else None)
 
 @st.cache_data(ttl=300)
-def fetch_60d_5m_kline(ticker, offset):
+def fetch_kline_data(ticker, offset):
+    """將 interval 改為 15m，period 維持 60d 以確保數據量"""
     try:
-        df = yf.download(ticker, period="60d", interval="5m", progress=False)
+        df = yf.download(ticker, period="60d", interval="15m", progress=False)
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        # 精確處理：所有價格加基差
         df = df + offset
         df['time_label'] = df.index.strftime('%m-%d %H:%M')
         return df
@@ -64,48 +70,41 @@ def clean_csv(filepath, offset):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce')
     df = df.dropna(subset=['Strike']).sort_values('Strike')
-    # 精確處理：執行價加基差
     df['Adjusted_Strike'] = df['Strike'] + offset
     return df
 
-# --- 3. 繪圖組件 (修正：點位精確對齊) ---
+# --- 3. 繪圖組件 (15m K線 + 精確對齊) ---
 
 def draw_chart_1_kline(df_k, df_oi, symbol):
-    """圖 1: 點位精確對齊版"""
     last_p = df_k['Close'].iloc[-1]
     conf = CONFIG[symbol]
     
-    # 1. 決定顯示區間 (由籌碼牆決定，但確保現價在內)
+    # 自動聚焦籌碼牆區間
     cw_idx = df_oi['Call Open Interest'].idxmax()
     pw_idx = df_oi['Put Open Interest'].idxmax()
     wall_min = min(df_oi.loc[cw_idx, 'Adjusted_Strike'], df_oi.loc[pw_idx, 'Adjusted_Strike'])
     wall_max = max(df_oi.loc[cw_idx, 'Adjusted_Strike'], df_oi.loc[pw_idx, 'Adjusted_Strike'])
     
-    # 加入現價進行比較，確保視角不會漏掉現價
-    view_min = min(wall_min, last_p)
-    view_max = max(wall_max, last_p)
-    
-    # 上下各留 15% 空間
+    view_min, view_max = min(wall_min, last_p), max(wall_max, last_p)
     margin = (view_max - view_min) * 0.15
     y_min, y_max = view_min - margin, view_max + margin
     
-    # 篩選要畫在右圖的 OI 數據
     oi_v = df_oi[(df_oi['Adjusted_Strike'] >= y_min) & (df_oi['Adjusted_Strike'] <= y_max)]
     diff = oi_v['Adjusted_Strike'].diff().median()
     bar_w = (diff if not pd.isna(diff) and diff > 0 else conf['default_width']) * 0.75
 
-    # 核心修正：shared_yaxes=True 確保左右刻度絕對同步
+    # 核心：強制共享 Y 軸，間距設為 0
     fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0, column_widths=[0.82, 0.18])
     
-    # 左側：K線
+    # 1. 15m K線
     fig.add_trace(go.Candlestick(
         x=df_k['time_label'], open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'],
         increasing_line_color='#26A69A', decreasing_line_color='#EF5350',
         increasing_fillcolor='#26A69A', decreasing_fillcolor='#EF5350',
-        name="K線"
+        line_width=1.2, name="15m K線"
     ), row=1, col=1)
     
-    # 右側：OI 牆
+    # 2. OI 牆
     fig.add_trace(go.Bar(
         y=oi_v['Adjusted_Strike'], x=oi_v['Call Open Interest']/1e3, orientation='h', 
         marker_color="#0000FF", width=bar_w, name="Call OI",
@@ -118,12 +117,13 @@ def draw_chart_1_kline(df_k, df_oi, symbol):
         hovertemplate="點數: %{y}<br>Put OI: %{x:.1f}K"
     ), row=1, col=2)
     
-    # 同步設定：強制左右兩個 y 軸範圍完全一致
+    # 精確對齊範圍
     fig.update_yaxes(range=[y_min, y_max], gridcolor='#E1E1E1', row=1, col=1)
     fig.update_yaxes(range=[y_min, y_max], row=1, col=2)
 
     total_bars = len(df_k)
-    fig.update_xaxes(type='category', range=[max(0, total_bars-250), total_bars-1], row=1, col=1)
+    # 15m 圖表顯示最近 150 根（約 1-2 週交易），視覺最自然
+    fig.update_xaxes(type='category', nticks=12, range=[max(0, total_bars-150), total_bars-1], row=1, col=1)
     
     fig.update_layout(
         height=620, margin=dict(t=30, b=10, l=10, r=10), template="plotly_white", 
@@ -131,7 +131,7 @@ def draw_chart_1_kline(df_k, df_oi, symbol):
     )
     st.plotly_chart(fig, use_container_width=True)
 
-# ----------------- 其餘 6 張圖表邏輯完全保留 -----------------
+# ----------------- 其餘 6 張圖表保持原樣 -----------------
 
 def draw_chart_2_gex(df_vol, last_p, symbol):
     diff = df_vol['Adjusted_Strike'].diff().median()
@@ -145,7 +145,6 @@ def draw_chart_2_gex(df_vol, last_p, symbol):
 
 def draw_chart_3_details(df_oi, last_p, symbol, mode="Gamma"):
     scale = 1e8 if mode == "Gamma" else 1e3
-    unit = "億" if mode == "Gamma" else "K"
     col_c = f"Call {mode} Exposure" if mode == "Gamma" else "Call Open Interest"
     col_p = f"Put {mode} Exposure" if mode == "Gamma" else "Put Open Interest"
     diff = df_oi['Adjusted_Strike'].diff().median()
@@ -159,7 +158,7 @@ def draw_chart_3_details(df_oi, last_p, symbol, mode="Gamma"):
 
 # --- 4. 主程式 ---
 
-st.markdown("<h1 style='text-align: center; margin-bottom: 0px;'>🎯 ES & NQ 精確點位對齊監控系統</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center; margin-bottom: 0px;'>🎯 ES & NQ 15m 籌碼對齊監控系統</h1>", unsafe_allow_html=True)
 
 for asset in ["SPX", "NQ"]:
     st.markdown(f"## {CONFIG[asset]['label']}")
@@ -168,7 +167,7 @@ for asset in ["SPX", "NQ"]:
     if oi_f and vol_f:
         df_oi = clean_csv(oi_f, CONFIG[asset]['offset'])
         df_vol = clean_csv(vol_f, CONFIG[asset]['offset'])
-        df_k = fetch_60d_5m_kline(CONFIG[asset]['ticker'], CONFIG[asset]['offset'])
+        df_k = fetch_kline_data(CONFIG[asset]['ticker'], CONFIG[asset]['offset'])
         
         if df_k is not None:
             last_p = df_k['Close'].iloc[-1]
