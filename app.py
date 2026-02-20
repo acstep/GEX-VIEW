@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # 頁面基本設定
-st.set_page_config(page_title="淺藍專業期權版", layout="wide")
+st.set_page_config(page_title="專業級期權分析系統 (單位：億)", layout="wide")
 
 # 自定義 CSS 讓網頁背景變成淡藍色
 st.markdown("""
@@ -18,7 +18,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 配置與配色 (淺色背景優化版)
+# 組態與配色 (淺色背景優化版)
 CONFIG = {
     "SPX": {
         "label": "ES / SPX (標普 500)",
@@ -63,6 +63,9 @@ def clean_data(df, offset):
             df[col] = pd.to_numeric(df[col], errors='coerce')
     df = df.dropna(subset=['Strike']).sort_values('Strike')
     df['Adjusted_Strike'] = df['Strike'] + offset
+    # 將 Gamma 曝險金額轉換為「億」(10^8)
+    if 'Net Gamma Exposure' in df.columns:
+        df['Net_GEX_Yi'] = df['Net Gamma Exposure'] / 1e8
     return df
 
 def get_levels(df):
@@ -103,29 +106,29 @@ def create_vivid_plot(df_oi, df_vol, symbol):
         hovertemplate='看跌口數: %{y:,.0f}<extra></extra>'
     ), secondary_y=False)
 
-    # 3. 淨 Gamma 曲線 (深藍色加粗)
+    # 3. 淨 Gamma 曲線 (深藍色加粗) - 使用「億」為單位
     fig.add_trace(go.Scatter(
-        x=df_oi['Adjusted_Strike'], y=df_oi['Net Gamma Exposure'],
-        name='淨 GEX', 
+        x=df_oi['Adjusted_Strike'], y=df_oi['Net_GEX_Yi'],
+        name='淨 GEX (億)', 
         line=dict(color='#00008B', width=5), 
-        hovertemplate='淨 Gamma: %{y:,.0f}<extra></extra>'
+        hovertemplate='淨 Gamma: %{y:,.2f} 億<extra></extra>'
     ), secondary_y=True)
 
-    # 4. 波動 Gamma 曲線
+    # 4. 波動 Gamma 曲線 - 使用「億」為單位
     fig.add_trace(go.Scatter(
-        x=df_vol['Adjusted_Strike'], y=df_vol['Net Gamma Exposure'],
-        name='波動 GEX', 
+        x=df_vol['Adjusted_Strike'], y=df_vol['Net_GEX_Yi'],
+        name='波動 GEX (億)', 
         line=dict(color='#FF8C00', width=3, dash='dash'), 
-        hovertemplate='波動 Gamma: %{y:,.0f}<extra></extra>'
+        hovertemplate='波動 Gamma: %{y:,.2f} 億<extra></extra>'
     ), secondary_y=True)
 
-    # 垂直線設定 (改為黑色/深灰色以適應淺色背景)
+    # 垂直線標註
     line_font = dict(size=18, color="black", family="Arial Black")
     if cw: fig.add_vline(x=cw, line_dash="dash", line_color="green", line_width=3, annotation_text=f"買權牆: {cw:.0f}", annotation_font=line_font)
     if pw: fig.add_vline(x=pw, line_dash="dash", line_color="red", line_width=3, annotation_text=f"賣權牆: {pw:.0f}", annotation_font=line_font)
     if v_flip: fig.add_vline(x=v_flip, line_width=4, line_color="black", annotation_text=f"轉折: {v_flip:.0f}", annotation_font=line_font)
 
-    # --- Layout 設定 (淺色背景優化) ---
+    # --- Layout 設定 ---
     fig.update_layout(
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='#F0F8FF',
@@ -144,13 +147,13 @@ def create_vivid_plot(df_oi, df_vol, symbol):
             gridcolor='white'
         ),
         yaxis2=dict(
-            title=dict(text="GEX 強度", font=dict(size=20, color='black')),
+            title=dict(text="GEX 強度 (億美元)", font=dict(size=20, color='black')),
             tickfont=dict(size=16, color='black'),
             overlaying='y', side='right', showgrid=False
         ),
         hoverlabel=dict(
-            bgcolor="#001F3F", # 深藍色背景
-            font_size=20, # 超大字體
+            bgcolor="#001F3F",
+            font_size=20,
             font_color="white",
             font_family="Arial Black"
         ),
@@ -180,7 +183,7 @@ else:
             cw, pw, _ = get_levels(df_oi)
             _, _, v_flip = get_levels(df_vol)
 
-            # 頂部大字體指標 (淺色背景卡片)
+            # 頂部大字體指標
             c1, c2, c3 = st.columns(3)
             with c1: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>多空分界 (Pivot)<br><b style='font-size:35px; color:black;'>{v_flip:.0f}</b></div>", unsafe_allow_html=True)
             with c2: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>買權牆 (Call Wall)<br><b style='font-size:35px; color:green;'>{cw:.0f}</b></div>", unsafe_allow_html=True)
