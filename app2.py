@@ -8,9 +8,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # --- 1. 頁面基本設定 ---
-st.set_page_config(page_title="ES & NQ 籌碼監控 (連續加強版)", layout="wide")
+st.set_page_config(page_title="專業級期貨籌碼監控系統", layout="wide")
 
-# 自定義 CSS
+# 自定義 CSS (背景淡藍色)
 st.markdown("""
     <style>
     .stApp { background-color: #F0F8FF; }
@@ -18,7 +18,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 完全複製 Barchart 配色
+# 完全複製 Barchart 專業配色
 COLORS = {
     "pos_bar": "#0000FF", "neg_bar": "#FFA500", "agg_line": "#3498db",
     "flip_line": "#FF0000", "price_line": "#008000",
@@ -26,20 +26,8 @@ COLORS = {
 }
 
 CONFIG = {
-    "SPX": {
-        "label": "🇺🇸 ES / SPX (標普 500 期貨基準)",
-        "ticker": "^SPX", 
-        "basis": 17.4, 
-        "keywords": ["SPX", "ES"],
-        "width_bar": 4  # 加粗
-    },
-    "NQ": {
-        "label": "💻 NQ / NASDAQ 100 (那指期貨基準)",
-        "ticker": "^NDX", 
-        "basis": 57.6, 
-        "keywords": ["IUXX", "NQ"],
-        "width_bar": 40 # 大幅加粗，對應 NQ 的大點數間距
-    }
+    "SPX": {"label": "🇺🇸 ES / SPX (標普 500)", "ticker": "^SPX", "basis": 17.4, "keywords": ["SPX", "ES"]},
+    "NQ": {"label": "💻 NQ / NASDAQ 100 (那斯達克)", "ticker": "^NDX", "basis": 57.6, "keywords": ["IUXX", "NQ"]}
 }
 DATA_DIR = "data"
 
@@ -47,13 +35,13 @@ DATA_DIR = "data"
 
 @st.cache_data(ttl=60)
 def fetch_yahoo_kline(ticker, basis):
+    """從 Yahoo 抓取真實 5 分鐘數據（近 5 天）"""
     try:
         df = yf.download(ticker, period="5d", interval="5m", progress=False)
         if df.empty: return None
         if df.columns.nlevels > 1:
             df.columns = df.columns.get_level_values(0)
         df = df + basis
-        # 連續 K 線關鍵：使用字串格式化標籤
         df['time_label'] = df.index.strftime('%m-%d %H:%M')
         return df
     except:
@@ -82,75 +70,85 @@ def get_safe_float(series):
     val = series.iloc[-1]
     return float(val.iloc[0]) if isinstance(val, pd.Series) else float(val)
 
-# --- 3. 繪圖組件 ---
+# --- 3. 繪圖組件 (互動式 Plotly + TIPS) ---
 
 def draw_kline_profile(oi_df, symbol):
-    """圖 1: 連續 K 線 + 加粗 OI 牆"""
+    """圖 1: 5m 連續 K 線 + 動態比例籌碼牆"""
     df_k = fetch_yahoo_kline(CONFIG[symbol]['ticker'], CONFIG[symbol]['basis'])
     if df_k is None: return
 
     last_p = get_safe_float(df_k['Close'])
-    # 設定顯示區間，避免過多柱子導致變細
-    y_range = 100 if symbol == "SPX" else 300 
-    oi_v = oi_df[(oi_df['Strike_Fut'] >= last_p - y_range) & (oi_df['Strike_Fut'] <= last_p + y_range)]
+    y_range = 100 if symbol == "SPX" else 350
+    oi_v = oi_df[(oi_df['Strike_Fut'] >= last_p - y_range) & (oi_df['Strike_Fut'] <= last_p + y_range)].copy()
+
+    # --- 關鍵：自動計算最適合的柱狀圖寬度 ---
+    strike_diff = oi_v['Strike_Fut'].diff().median()
+    if pd.isna(strike_diff) or strike_diff == 0: strike_diff = 5 if symbol == "SPX" else 25
+    bar_width = strike_diff * 0.7 # 只佔用 70% 的空間，保持條條分明的質感
 
     fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.01, column_widths=[0.8, 0.2])
     
-    # K線：設定為分類軸 (Category) 實現完全連續
+    # 左：K線 (Category 軸確保連續)
     fig.add_trace(go.Candlestick(
         x=df_k['time_label'], open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'], 
         name="K線"
     ), row=1, col=1)
     
-    # OI 牆：調整 width 參數讓它變粗
+    # 右：水平 OI 牆
     fig.add_trace(go.Bar(
         y=oi_v['Strike_Fut'], x=oi_v['Call Open Interest']/1e3, orientation='h', 
-        name="Call OI", marker_color=COLORS['pos_bar'], 
-        width=CONFIG[symbol]['width_bar'], # 使用加粗參數
+        name="Call OI", marker_color=COLORS['pos_bar'], width=bar_width,
         hovertemplate="Strike: %{y}<br>Call OI: %{x:.1f}K"
     ), row=1, col=2)
-    
     fig.add_trace(go.Bar(
         y=oi_v['Strike_Fut'], x=-oi_v['Put Open Interest']/1e3, orientation='h', 
-        name="Put OI", marker_color=COLORS['neg_bar'],
-        width=CONFIG[symbol]['width_bar'], # 使用加粗參數
+        name="Put OI", marker_color=COLORS['neg_bar'], width=bar_width,
         hovertemplate="Strike: %{y}<br>Put OI: %{x:.1f}K"
     ), row=1, col=2)
 
-    fig.add_hline(y=last_p, line_dash="dash", line_color=COLORS['price_line'], annotation_text=f"期貨現價:{last_p:,.1f}")
-
+    fig.add_hline(y=last_p, line_dash="dash", line_color=COLORS['price_line'], annotation_text=f"現價:{last_p:,.1f}")
+    
     fig.update_xaxes(type='category', nticks=15, row=1, col=1)
     fig.update_layout(height=750, template="plotly_white", showlegend=False, xaxis_rangeslider_visible=False, hovermode="x unified")
     st.plotly_chart(fig, width='stretch')
 
 def draw_gex_main(gamma_df, symbol):
-    """圖 2: 淨 Gamma 曝險圖"""
+    """圖 2: 淨 Gamma 曝險圖 (Barchart 配色)"""
     df_k = fetch_yahoo_kline(CONFIG[symbol]['ticker'], CONFIG[symbol]['basis'])
     last_p = get_safe_float(df_k['Close']) if df_k is not None else 0
     
+    # 動態寬度
+    strike_diff = gamma_df['Strike_Fut'].diff().median()
+    bar_w = strike_diff * 0.7 if not pd.isna(strike_diff) else 5
+
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(go.Bar(x=gamma_df['Strike_Fut'], y=gamma_df['Net Gamma Exposure']/1e8, name="Net GEX", 
+    fig.add_trace(go.Bar(x=gamma_df['Strike_Fut'], y=gamma_df['Net Gamma Exposure']/1e8, name="Net GEX", width=bar_w,
                          marker_color=np.where(gamma_df['Net Gamma Exposure']>=0, COLORS['pos_bar'], COLORS['neg_bar'])), secondary_y=False)
-    fig.add_trace(go.Scatter(x=gamma_df['Strike_Fut'], y=gamma_df['Gamma Exposure Profile']/1e9, name="Agg", line=dict(color=COLORS['agg_line'], width=4)), secondary_y=True)
+    fig.add_trace(go.Scatter(x=gamma_df['Strike_Fut'], y=gamma_df['Gamma Exposure Profile']/1e9, name="Aggregate", 
+                             line=dict(color=COLORS['agg_line'], width=4)), secondary_y=True)
     
     fig.add_vline(x=last_p, line_color=COLORS['price_line'], line_dash="dash")
     fig.update_layout(title=f"<b>{symbol} 淨 Gamma 曝險</b>", height=500, template="plotly_white")
     st.plotly_chart(fig, width='stretch')
 
 def draw_details(df, symbol, mode="Gamma"):
-    """圖 3 & 4: 買賣權細節對比"""
+    """圖 3 & 4: 買賣權對比"""
+    strike_diff = df['Strike_Fut'].diff().median()
+    bar_w = strike_diff * 0.7 if not pd.isna(strike_diff) else 5
     scale = 1e8 if mode == "Gamma" else 1e3
     col_c = "Call Gamma Exposure" if mode == "Gamma" else "Call Open Interest"
     col_p = "Put Gamma Exposure" if mode == "Gamma" else "Put Open Interest"
+    
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=df['Strike_Fut'], y=df[col_c]/scale, name="Call", marker_color=COLORS['pos_bar']))
-    fig.add_trace(go.Bar(x=df['Strike_Fut'], y=df[col_p]/scale if mode=="Gamma" else -df[col_p]/scale, name="Put", marker_color=COLORS['neg_bar']))
-    fig.update_layout(title=f"{symbol} {mode} 細節", height=400, barmode='relative', template="plotly_white")
+    fig.add_trace(go.Bar(x=df['Strike_Fut'], y=df[col_c]/scale, name="Call", marker_color=COLORS['pos_bar'], width=bar_w))
+    fig.add_trace(go.Bar(x=df['Strike_Fut'], y=df[col_p]/scale if mode=="Gamma" else -df[col_p]/scale, 
+                         name="Put", marker_color=COLORS['neg_bar'], width=bar_w))
+    fig.update_layout(title=f"{symbol} {mode} 細節對比", height=400, barmode='relative', template="plotly_white")
     st.plotly_chart(fig, width='stretch')
 
 # --- 4. 主程式執行 ---
 
-st.markdown("<h1 style='text-align: center;'>🎯 ES & NQ 連續 K 線與加粗籌碼監控</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>🎯 ES & NQ 數據監控系統 (精準比例連續版)</h1>", unsafe_allow_html=True)
 
 for asset in ["SPX", "NQ"]:
     st.markdown(f"---")
@@ -160,9 +158,11 @@ for asset in ["SPX", "NQ"]:
     if oi_f and vol_f:
         df_oi = clean_csv(oi_f, CONFIG[asset]['basis'])
         df_vol = clean_csv(vol_f, CONFIG[asset]['basis'])
+        
+        # 垂直編排 4 張圖
         draw_kline_profile(df_oi, asset)
         draw_gex_main(df_vol, asset)
         draw_details(df_oi, asset, mode="Gamma")
         draw_details(df_oi, asset, mode="Open Interest")
     else:
-        st.error(f"❌ 數據讀取失敗，請檢查 data 資料夾檔案")
+        st.error(f"❌ 找不到 {asset} 的數據檔案，請檢查 data 資料夾")
