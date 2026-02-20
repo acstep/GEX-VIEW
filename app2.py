@@ -23,14 +23,9 @@ st.markdown("""
         margin-bottom: 5px; 
     }
     .metric-card { text-align:center; background:white; padding:10px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); }
-    /* 縮減 Streamlit 預設組件間距 */
     .block-container { padding-top: 2rem; padding-bottom: 1rem; }
     </style>
     """, unsafe_allow_html=True)
-
-COLORS = {
-    "pos_bar": "#0000FF", "neg_bar": "#FFA500", "agg_line": "#3498db",
-}
 
 CONFIG = {
     "SPX": {"label": "🇺🇸 ES / SPX (標普 500)", "ticker": "^SPX", "offset": 17.4, "keywords": ["SPX", "ES"]},
@@ -72,31 +67,53 @@ def fetch_60d_5m_kline(ticker, offset):
 
 def clean_csv(filepath, offset):
     df = pd.read_csv(filepath)
-    for col in ['Strike', 'Call Open Interest', 'Put Open Interest', 'Net Gamma Exposure', 'Call Gamma Exposure', 'Put Gamma Exposure', 'Gamma Exposure Profile']:
+    for col in ['Strike', 'Call Open Interest', 'Put Open Interest', 'Net Gamma Exposure', 'Gamma Exposure Profile']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce')
     df = df.dropna(subset=['Strike']).sort_values('Strike')
     df['Adjusted_Strike'] = df['Strike'] + offset
     return df
 
-# --- 3. 繪圖組件 (視覺優化核心) ---
+# --- 3. 繪圖組件 (自動聚焦籌碼區間) ---
 
 def draw_chart_1_kline(df_k, df_oi, symbol):
-    """圖 1: 緊湊型 60日 K 線牆 (已縮減白邊)"""
+    """圖 1: 自動聚焦於有 OI 籌碼區間的 K 線圖"""
     last_p = df_k['Close'].iloc[-1]
-    y_range = 100 if symbol == "SPX" else 350
-    oi_v = df_oi[(df_oi['Adjusted_Strike'] >= last_p - y_range) & (df_oi['Adjusted_Strike'] <= last_p + y_range)]
+    
+    # 核心邏輯：找出右側 OI 有數值的部分
+    # 這裡我們定義「有值」為 OI 最大的前 10% 或是大於某個門檻的執行價區間
+    # 簡單起見，我們直接抓出 Call Wall 與 Put Wall，並往上下擴展
+    cw_idx = df_oi['Call Open Interest'].idxmax()
+    pw_idx = df_oi['Put Open Interest'].idxmax()
+    wall_min = min(df_oi.loc[cw_idx, 'Adjusted_Strike'], df_oi.loc[pw_idx, 'Adjusted_Strike'])
+    wall_max = max(df_oi.loc[cw_idx, 'Adjusted_Strike'], df_oi.loc[pw_idx, 'Adjusted_Strike'])
+    
+    # 在城牆區間上下各留 10% 的空白邊距
+    margin_val = (wall_max - wall_min) * 0.1
+    if margin_val == 0: margin_val = 50 # 預防只有一個執行價的情況
+    
+    y_min = wall_min - margin_val
+    y_max = wall_max + margin_val
+    
+    # 篩選要畫在右邊的 OI 數據 (只畫這個區間)
+    oi_v = df_oi[(df_oi['Adjusted_Strike'] >= y_min) & (df_oi['Adjusted_Strike'] <= y_max)]
     bar_w = (oi_v['Adjusted_Strike'].diff().median() if not oi_v.empty else 5) * 0.7
     
     fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.01, column_widths=[0.8, 0.2])
+    
+    # 1. K線圖
     fig.add_trace(go.Candlestick(x=df_k['time_label'], open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'], name="K線"), row=1, col=1)
+    
+    # 2. OI 牆 (TIP 顯示點位)
     fig.add_trace(go.Bar(y=oi_v['Adjusted_Strike'], x=oi_v['Call Open Interest']/1e3, orientation='h', marker_color="#0000FF", width=bar_w, hovertemplate="點數: %{y}<br>Call OI: %{x:.1f}K"), row=1, col=2)
     fig.add_trace(go.Bar(y=oi_v['Adjusted_Strike'], x=-oi_v['Put Open Interest']/1e3, orientation='h', marker_color="#FFA500", width=bar_w, hovertemplate="點數: %{y}<br>Put OI: %{x:.1f}K"), row=1, col=2)
     
     total_bars = len(df_k)
     fig.update_xaxes(type='category', nticks=15, range=[total_bars-200, total_bars-1], row=1, col=1)
     
-    # 核心修正：縮減上下白邊 (t:20, b:20)
+    # 關鍵：設定 Y 軸範圍只在有籌碼的部分
+    fig.update_yaxes(range=[y_min, y_max], row=1, col=1)
+
     fig.update_layout(
         height=600, 
         margin=dict(t=30, b=10, l=10, r=10), 
@@ -108,7 +125,6 @@ def draw_chart_1_kline(df_k, df_oi, symbol):
     st.plotly_chart(fig, use_container_width=True)
 
 def draw_chart_2_gex(df_vol, last_p, symbol):
-    """圖 2: 淨 Gamma 曝險與累計曲線"""
     bar_w = (df_vol['Adjusted_Strike'].diff().median() if not df_vol.empty else 5) * 0.7
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(go.Bar(x=df_vol['Adjusted_Strike'], y=df_vol['Net Gamma Exposure']/1e8, marker_color=np.where(df_vol['Net Gamma Exposure']>=0, "#0000FF", "#FFA500"), width=bar_w, hovertemplate="點數: %{x}<br>淨GEX: %{y:.2f}億"), secondary_y=False)
@@ -118,13 +134,11 @@ def draw_chart_2_gex(df_vol, last_p, symbol):
     st.plotly_chart(fig, use_container_width=True)
 
 def draw_chart_3_details(df_oi, last_p, symbol, mode="Gamma"):
-    """圖 3 & 4: 買賣權細節對比"""
     scale = 1e8 if mode == "Gamma" else 1e3
     unit = "億" if mode == "Gamma" else "K"
     col_c = f"Call {mode} Exposure" if mode == "Gamma" else "Call Open Interest"
     col_p = f"Put {mode} Exposure" if mode == "Gamma" else "Put Open Interest"
     bar_w = (df_oi['Adjusted_Strike'].diff().median() if not df_oi.empty else 5) * 0.7
-    
     fig = go.Figure()
     fig.add_trace(go.Bar(x=df_oi['Adjusted_Strike'], y=df_oi[col_c]/scale, name="Call", marker_color="#0000FF", width=bar_w, hovertemplate=f"點數: %{{x}}<br>Call {mode}: %{{y:.2f}}{unit}"))
     fig.add_trace(go.Bar(x=df_oi['Adjusted_Strike'], y=df_oi[col_p]/scale if mode=="Gamma" else -df_oi[col_p]/scale, name="Put", marker_color="#FFA500", width=bar_w, hovertemplate=f"點數: %{{x}}<br>Put {mode}: %{{y:.2f}}{unit}"))
@@ -143,14 +157,13 @@ for asset in ["SPX", "NQ"]:
     if oi_f and vol_f:
         loaded_log.append(os.path.basename(oi_f))
         loaded_log.append(os.path.basename(vol_f))
-        
         df_oi = clean_csv(oi_f, CONFIG[asset]['offset'])
         df_vol = clean_csv(vol_f, CONFIG[asset]['offset'])
         df_k = fetch_60d_5m_kline(CONFIG[asset]['ticker'], CONFIG[asset]['offset'])
         
         if df_k is not None:
             last_p = df_k['Close'].iloc[-1]
-            # 1. K線牆 (緊湊顯示)
+            # 1. K線牆 (自動聚焦有值區間)
             draw_chart_1_kline(df_k, df_oi, asset)
             # 2. 淨 GEX
             draw_chart_2_gex(df_vol, last_p, asset)
@@ -159,8 +172,6 @@ for asset in ["SPX", "NQ"]:
             # 4. OI 細節
             draw_chart_3_details(df_oi, last_p, asset, mode="Open Interest")
             st.divider()
-    else:
-        st.error(f"❌ 找不到 {asset} 的數據檔案")
 
 if loaded_log:
     st.markdown("### 📂 數據源明細")
