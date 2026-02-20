@@ -1,44 +1,28 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
 import os
 import glob
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-# 頁面設定 (強制使用寬螢幕模式)
-st.set_page_config(page_title="ES & NQ Gamma Map", layout="wide")
+# 頁面設定
+st.set_page_config(page_title="Interactive Gamma Map", layout="wide")
 
-# 設定不同指數的參數 (SPX 在前)
 CONFIG = {
-    "SPX": {
-        "label": "ES / SPX",
-        "offset": 0, 
-        "range": 150, 
-        "color": "blue", 
-        "keywords": ["SPX", "ES"]
-    },
-    "NQ": {
-        "label": "NQ / NASDAQ",
-        "offset": 75, 
-        "range": 600, 
-        "color": "teal", 
-        "keywords": ["IUXX", "NQ"]
-    }
+    "SPX": {"label": "ES / SPX", "offset": 0, "range": 150, "color": "#1f77b4", "keywords": ["SPX", "ES"]},
+    "NQ": {"label": "NQ / NASDAQ", "offset": 75, "range": 600, "color": "#008080", "keywords": ["IUXX", "NQ"]}
 }
-
 DATA_DIR = "data"
 
 def get_latest_files(symbol_keywords):
     search_path = os.path.join(DATA_DIR, "*.csv")
     all_files = glob.glob(search_path)
     if not all_files: return None, None
-    
     symbol_files = [f for f in all_files if any(k.upper() in os.path.basename(f).upper() for k in symbol_keywords)]
     if not symbol_files: return None, None
-
     oi_files = [f for f in symbol_files if "open-interest" in f.lower()]
     vol_files = [f for f in symbol_files if "open-interest" not in f.lower()]
-    
     latest_oi = max(oi_files, key=os.path.getmtime) if oi_files else None
     latest_vol = max(vol_files, key=os.path.getmtime) if vol_files else None
     return latest_oi, latest_vol
@@ -61,84 +45,86 @@ def get_levels(df):
         y1, y2 = df.iloc[i]['Net Gamma Exposure'], df.iloc[i+1]['Net Gamma Exposure']
         if pd.isna(y1) or pd.isna(y2): continue
         if y1 * y2 <= 0:
-            x1, x2 = df.iloc[i]['Adjusted_Strike'], df.iloc[i+1]['Adjusted_Strike']
-            if y2 != y1:
-                flip = x1 - y1 * (x2 - x1) / (y2 - y1)
-                break
+            x1 = df.iloc[i]['Adjusted_Strike']
+            flip = x1 # 簡化計算
+            break
     return cw, pw, flip
 
-def draw_plot(df_oi, df_vol, symbol, oi_path, vol_path):
+def create_interactive_plot(df_oi, df_vol, symbol):
     conf = CONFIG[symbol]
-    # 縮小圖表尺寸以利並排 (高度縮減)
-    fig, ax1 = plt.subplots(figsize=(8, 5)) 
-    
-    oi_cw, oi_pw, _ = get_levels(df_oi)
-    _, _, vol_flip = get_levels(df_vol)
+    cw, pw, _ = get_levels(df_oi)
+    _, _, flip = get_levels(df_vol)
 
-    width = 20 if "NQ" in symbol else 5
-    ax1.bar(df_oi['Adjusted_Strike'], df_oi['Call Open Interest'], width=width, color=conf['color'], alpha=0.3, label='Call OI')
-    ax1.bar(df_oi['Adjusted_Strike'], -df_oi['Put Open Interest'], width=width, color='crimson', alpha=0.3, label='Put OI')
-    
-    ax2 = ax1.twinx()
-    ax2.plot(df_oi['Adjusted_Strike'], df_oi['Net Gamma Exposure'], color='blue', linewidth=1.5, label='OI Gamma')
-    ax2.plot(df_vol['Adjusted_Strike'], df_vol['Net Gamma Exposure'], color='orange', linestyle='--', linewidth=1.2, label='Vol Gamma')
+    # 建立雙 Y 軸圖表
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    if oi_cw: ax1.axvline(oi_cw, color='green', linestyle=':', linewidth=1, label=f'CW:{oi_cw:.0f}')
-    if oi_pw: ax1.axvline(oi_pw, color='red', linestyle=':', linewidth=1, label=f'PW:{oi_pw:.0f}')
-    if vol_flip: ax1.axvline(vol_flip, color='orange', linewidth=1.5, label=f'Piv:{vol_flip:.1f}')
+    # 1. Call OI (正柱狀圖)
+    fig.add_trace(go.Bar(
+        x=df_oi['Adjusted_Strike'], y=df_oi['Call Open Interest'],
+        name='Call OI', marker_color=conf['color'], opacity=0.4,
+        hovertemplate='Strike: %{x}<br>Call OI: %{y}<extra></extra>'
+    ), secondary_y=False)
 
-    if vol_flip:
-        ax1.set_xlim(vol_flip - conf['range'], vol_flip + conf['range'])
+    # 2. Put OI (負柱狀圖)
+    fig.add_trace(go.Bar(
+        x=df_oi['Adjusted_Strike'], y=-df_oi['Put Open Interest'],
+        name='Put OI', marker_color='crimson', opacity=0.4,
+        hovertemplate='Strike: %{x}<br>Put OI: %{y}<extra></extra>'
+    ), secondary_y=False)
 
-    # 縮小字體以防並排時擠壓
-    plt.title(f"{conf['label']} Gamma Map", fontsize=10)
-    ax1.tick_params(axis='both', which='major', labelsize=8)
-    ax1.legend(loc='upper left', fontsize='x-small', framealpha=0.5)
-    ax2.legend(loc='upper right', fontsize='x-small', framealpha=0.5)
-    
+    # 3. OI Net Gamma (藍色實線)
+    fig.add_trace(go.Scatter(
+        x=df_oi['Adjusted_Strike'], y=df_oi['Net Gamma Exposure'],
+        name='OI Gamma', line=dict(color='blue', width=2),
+        hovertemplate='Strike: %{x}<br>Net GEX: %{y:.2f}<extra></extra>'
+    ), secondary_y=True)
+
+    # 4. Vol Net Gamma (橘色虛線)
+    fig.add_trace(go.Scatter(
+        x=df_vol['Adjusted_Strike'], y=df_vol['Net Gamma Exposure'],
+        name='Vol Gamma', line=dict(color='orange', width=1.5, dash='dash'),
+        hovertemplate='Strike: %{x}<br>Vol GEX: %{y:.2f}<extra></extra>'
+    ), secondary_y=True)
+
+    # 標註關鍵位 (垂直線)
+    if cw: fig.add_vline(x=cw, line_dash="dot", line_color="green", annotation_text=f"CW:{cw:.0f}")
+    if pw: fig.add_vline(x=pw, line_dash="dot", line_color="red", annotation_text=f"PW:{pw:.0f}")
+    if flip: fig.add_vline(x=flip, line_width=2, line_color="orange", annotation_text=f"Pivot:{flip:.0f}")
+
+    # 版面設定
+    fig.update_layout(
+        title=f"{conf['label']} Interactive Map",
+        hovermode="x unified", # 同一 X 軸數值全部顯示在一個 Tip
+        height=450,
+        margin=dict(l=10, r=10, t=40, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)),
+        xaxis=dict(range=[flip-conf['range'], flip+conf['range']] if flip else None)
+    )
     return fig
 
 # --- 主介面 ---
-st.title("📊 ES & NQ 交易地圖 (並排模式)")
+st.title("💡 互動式 ES & NQ 交易地圖")
 
 if not os.path.exists(DATA_DIR):
-    st.error(f"找不到 `{DATA_DIR}` 資料夾！")
+    st.error("請建立 /data 資料夾")
 else:
-    # 建立左右兩欄
     col_left, col_right = st.columns(2)
     cols = {"SPX": col_left, "NQ": col_right}
 
     for symbol in ["SPX", "NQ"]:
         with cols[symbol]:
-            st.subheader(f"📈 {CONFIG[symbol]['label']}")
-            
             oi_file, vol_file = get_latest_files(CONFIG[symbol]['keywords'])
-            
             if oi_file and vol_file:
-                try:
-                    df_oi = clean_data(pd.read_csv(oi_file), CONFIG[symbol]['offset'])
-                    df_vol = clean_data(pd.read_csv(vol_file), CONFIG[symbol]['offset'])
-                    
-                    # 關鍵指標 (用較小的小卡片顯示)
-                    cw, pw, _ = get_levels(df_oi)
-                    _, _, flip = get_levels(df_vol)
-                    
-                    m1, m2, m3 = st.columns(3)
-                    m1.caption(f"Pivot: **{flip:.1f}**" if flip else "Pivot: N/A")
-                    m2.caption(f"Call Wall: **{cw:.0f}**" if cw else "CW: N/A")
-                    m3.caption(f"Put Wall: **{pw:.0f}**" if pw else "PW: N/A")
-                    
-                    # 繪圖
-                    fig = draw_plot(df_oi, df_vol, symbol, oi_file, vol_file)
-                    st.pyplot(fig, use_container_width=True)
-                    
-                    st.caption(f"📄 {os.path.basename(vol_file)}")
-                except Exception as e:
-                    st.error(f"錯誤: {e}")
+                df_oi = clean_data(pd.read_csv(oi_file), CONFIG[symbol]['offset'])
+                df_vol = clean_data(pd.read_csv(vol_file), CONFIG[symbol]['offset'])
+                
+                # 指標顯示
+                cw, pw, _ = get_levels(df_oi)
+                _, _, flip = get_levels(df_vol)
+                st.markdown(f"**{CONFIG[symbol]['label']}** | Pivot: `{flip:.0f}` | CW: `{cw:.0f}` | PW: `{pw:.0f}`")
+                
+                # 顯示互動圖表
+                fig = create_interactive_plot(df_oi, df_vol, symbol)
+                st.plotly_chart(fig, use_container_width=True)
             else:
                 st.warning(f"缺少 {symbol} 檔案")
-
-# 底部檔案清單 (收納起來)
-with st.expander("📁 檔案管理"):
-    if os.path.exists(DATA_DIR):
-        st.write(os.listdir(DATA_DIR))
