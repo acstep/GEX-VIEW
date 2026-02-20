@@ -7,31 +7,31 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # 頁面基本設定
-st.set_page_config(page_title="專業級期權分析系統", layout="wide")
+st.set_page_config(page_title="High-Contrast Gamma Map", layout="wide")
 
-# 配置與配色
+# 組態與配色 (使用您要求的鮮豔色系)
 CONFIG = {
     "SPX": {
         "label": "ES / SPX (標普 500)",
         "offset": 0,
-        "call_color": "#00FF66",
-        "put_color": "#FF0066",
+        "call_color": "#00FF66", # 鮮豔螢光綠
+        "put_color": "#FF007F",  # 鮮豔亮粉紅
         "keywords": ["SPX", "ES"]
     },
     "NQ": {
         "label": "NQ / NASDAQ 100 (那指)",
         "offset": 75,
-        "call_color": "#00FFFF",
-        "put_color": "#FF3333",
+        "call_color": "#00FFFF", # 亮青色
+        "put_color": "#FF3131",  # 螢光紅
         "keywords": ["IUXX", "NQ"]
     }
 }
 DATA_DIR = "data"
 
-# --- 側邊欄設定 ---
-st.sidebar.header("📊 圖表控制面板")
-range_spx = st.sidebar.slider("SPX 價格觀察範圍", 100, 2000, 500, step=50)
-range_nq = st.sidebar.slider("NQ 價格觀察範圍", 200, 3000, 1000, step=100)
+# --- 側邊欄控制 ---
+st.sidebar.header("🔍 顯示範圍設定")
+range_spx = st.sidebar.slider("SPX 觀察範圍 (+/-)", 50, 2000, 400, step=50)
+range_nq = st.sidebar.slider("NQ 觀察範圍 (+/-)", 100, 3000, 1000, step=100)
 RANGE_MAP = {"SPX": range_spx, "NQ": range_nq}
 
 def get_latest_files(symbol_keywords):
@@ -48,7 +48,7 @@ def get_latest_files(symbol_keywords):
     return latest_oi, latest_vol
 
 def clean_data(df, offset):
-    cols = ['Strike', 'Call Open Interest', 'Put Open Interest', 'Net Gamma Exposure']
+    cols = ['Strike', 'Call Open Interest', 'Put Open Interest', 'Net Gamma Exposure', 'Absolute Gamma Exposure']
     for col in cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -76,74 +76,66 @@ def create_vivid_plot(df_oi, df_vol, symbol):
     
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # 1. 看漲 OI (Call)
+    # 1. 看漲 OI (Call) - 加上白色細邊框增加發光感
     fig.add_trace(go.Bar(
-        x=df_oi['Adjusted_Strike'], 
-        y=df_oi['Call Open Interest'],
-        name='看漲 OI', 
+        x=df_oi['Adjusted_Strike'], y=df_oi['Call Open Interest'],
+        name='看漲 (Call) OI', 
         marker=dict(color=conf['call_color'], line=dict(width=1, color='white')),
         opacity=0.7,
-        hovertemplate='<b>執行價: %{x}</b><br>看漲口數: %{y:,.0f}<extra></extra>'
+        hovertemplate='<b>價格: %{x}</b><br>看漲口數: %{y:,.0f}<br><extra></extra>'
     ), secondary_y=False)
 
     # 2. 看跌 OI (Put)
     fig.add_trace(go.Bar(
-        x=df_oi['Adjusted_Strike'], 
-        y=-df_oi['Put Open Interest'],
-        name='看跌 OI', 
+        x=df_oi['Adjusted_Strike'], y=-df_oi['Put Open Interest'],
+        name='看跌 (Put) OI', 
         marker=dict(color=conf['put_color'], line=dict(width=1, color='white')),
         opacity=0.7,
-        hovertemplate='看跌口數: %{y:,.0f}<extra></extra>'
+        hovertemplate='看跌口數: %{y:,.0f}<br><extra></extra>'
     ), secondary_y=False)
 
-    # 3. 淨 Gamma 曲線
+    # 3. 淨 Gamma 曲線 (亮青色加粗實線)
     fig.add_trace(go.Scatter(
-        x=df_oi['Adjusted_Strike'], 
-        y=df_oi['Net Gamma Exposure'],
-        name='淨 GEX (OI)', 
-        line=dict(color='#00FFFF', width=3), 
-        hovertemplate='淨 Gamma: %{y:,.0f}<extra></extra>'
+        x=df_oi['Adjusted_Strike'], y=df_oi['Net Gamma Exposure'],
+        name='淨 GEX (趨勢)', 
+        line=dict(color='#00FFFF', width=4), 
+        hovertemplate='淨 Gamma 值: %{y:,.0f}<br><extra></extra>'
     ), secondary_y=True)
 
-    # 4. 波動 Gamma 曲線
+    # 4. 波動 Gamma 曲線 (亮橘色虛線)
     fig.add_trace(go.Scatter(
-        x=df_vol['Adjusted_Strike'], 
-        y=df_vol['Net Gamma Exposure'],
-        name='波動 GEX', 
-        line=dict(color='#CC00FF', width=2, dash='dash'), 
-        hovertemplate='波動 Gamma: %{y:,.0f}<extra></extra>'
+        x=df_vol['Adjusted_Strike'], y=df_vol['Net Gamma Exposure'],
+        name='波動 GEX (動態)', 
+        line=dict(color='#FFA500', width=2, dash='dash'), 
+        hovertemplate='波動 Gamma: %{y:,.0f}<br><extra></extra>'
     ), secondary_y=True)
 
-    # 垂直標註線
-    if cw: fig.add_vline(x=cw, line_dash="dash", line_color="#00FF00", line_width=2, annotation_text=f"CW:{cw:.0f}")
-    if pw: fig.add_vline(x=pw, line_dash="dash", line_color="#FF0066", line_width=2, annotation_text=f"PW:{pw:.0f}")
-    if v_flip: fig.add_vline(x=v_flip, line_width=3, line_color="#FFFFFF", annotation_text=f"Piv:{v_flip:.0f}")
+    # 關鍵位標註 (垂直線)
+    if cw: fig.add_vline(x=cw, line_dash="dash", line_color="#00FF66", line_width=2, annotation_text=f"買權牆: {cw:.0f}")
+    if pw: fig.add_vline(x=pw, line_dash="dash", line_color="#FF007F", line_width=2, annotation_text=f"賣權牆: {pw:.0f}")
+    if v_flip: fig.add_vline(x=v_flip, line_width=3, line_color="#FFFFFF", annotation_text=f"多空轉折: {v_flip:.0f}")
 
-    # --- 修正後的 Layout 設定 ---
+    # Layout 設定
     fig.update_layout(
         template="plotly_dark",
-        hovermode="x unified",
+        hovermode="x unified", # 讓滑鼠移到 X 軸時顯示該位置所有數據
+        title_text=f"<b>{conf['label']} 詳細 Gamma 數據圖</b>",
         height=600,
-        title_text=f"<b>{conf['label']} 詳細 Gamma 分析</b>",
         xaxis=dict(
-            title="Price / Strike",
-            gridcolor='rgba(255,255,255,0.1)',
+            title="執行價 (Strike)",
+            gridcolor='rgba(255,255,255,0.05)',
             range=[v_flip - RANGE_MAP[symbol], v_flip + RANGE_MAP[symbol]] if v_flip else None
         ),
-        yaxis=dict(title="Contracts (OI)"),
-        yaxis2=dict(title="Gamma Value", overlaying='y', side='right', showgrid=False)
-    )
-    
-    # 獨立設定 Legend 與 Margin 以防報錯
-    fig.update_layout(
+        yaxis=dict(title="未平倉合約口數 (OI)", gridcolor='rgba(255,255,255,0.05)'),
+        yaxis2=dict(title="Gamma 曝險值", overlaying='y', side='right', showgrid=False),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
         margin=dict(l=60, r=60, t=100, b=60)
     )
     
     return fig
 
-# --- 主程式 ---
-st.title("🏹 專業級期權分析監測")
+# --- 主介面 ---
+st.title("🏹 專業交易者分析系統 (ES & NQ)")
 
 if not os.path.exists(DATA_DIR):
     st.error(f"❌ 找不到目錄: {DATA_DIR}")
@@ -151,25 +143,23 @@ else:
     for symbol in ["SPX", "NQ"]:
         oi_f, vol_f = get_latest_files(CONFIG[symbol]['keywords'])
         if oi_f and vol_f:
-            st.markdown(f"### 📈 {CONFIG[symbol]['label']}")
+            st.markdown(f"### 📉 {CONFIG[symbol]['label']}")
             df_oi = clean_data(pd.read_csv(oi_f), CONFIG[symbol]['offset'])
             df_vol = clean_data(pd.read_csv(vol_f), CONFIG[symbol]['offset'])
             
             cw, pw, _ = get_levels(df_oi)
             _, _, v_flip = get_levels(df_vol)
 
+            # 指標卡片
             c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
-            c1.metric("Pivot", f"{v_flip:.0f}")
-            c2.metric("Call Wall", f"{cw:.0f}")
-            c3.metric("Put Wall", f"{pw:.0f}")
-            c4.info(f"📄 {os.path.basename(vol_f)}")
+            c1.metric("多空轉折", f"{v_flip:.0f}")
+            c2.metric("買權牆 (阻力)", f"{cw:.0f}")
+            c3.metric("賣權牆 (支撐)", f"{pw:.0f}")
+            c4.info(f"📄 最新檔案: {os.path.basename(vol_f)}")
 
             # 渲染圖表
-            try:
-                fig = create_vivid_plot(df_oi, df_vol, symbol)
-                st.plotly_chart(fig, use_container_width=True)
-            except Exception as e:
-                st.error(f"繪圖出錯: {e}")
+            fig = create_vivid_plot(df_oi, df_vol, symbol)
+            st.plotly_chart(fig, use_container_width=True)
             st.divider()
         else:
             st.warning(f"找不到 {symbol} 的數據。")
