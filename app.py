@@ -106,7 +106,7 @@ def create_vivid_plot(df_oi, df_vol, symbol):
         hovertemplate='看跌口數: %{y:,.0f}<extra></extra>'
     ), secondary_y=False)
 
-    # 3. 淨 Gamma 曲線 (深藍色加粗) - 使用「億」為單位
+    # 3. 淨 Gamma 曲線 (深藍色加粗)
     fig.add_trace(go.Scatter(
         x=df_oi['Adjusted_Strike'], y=df_oi['Net_GEX_Yi'],
         name='淨 GEX (億)', 
@@ -114,7 +114,7 @@ def create_vivid_plot(df_oi, df_vol, symbol):
         hovertemplate='淨 Gamma: %{y:,.2f} 億<extra></extra>'
     ), secondary_y=True)
 
-    # 4. 波動 Gamma 曲線 - 使用「億」為單位
+    # 4. 波動 Gamma 曲線
     fig.add_trace(go.Scatter(
         x=df_vol['Adjusted_Strike'], y=df_vol['Net_GEX_Yi'],
         name='波動 GEX (億)', 
@@ -122,7 +122,7 @@ def create_vivid_plot(df_oi, df_vol, symbol):
         hovertemplate='波動 Gamma: %{y:,.2f} 億<extra></extra>'
     ), secondary_y=True)
 
-    # 垂直線標註
+    # 垂直線設定
     line_font = dict(size=18, color="black", family="Arial Black")
     if cw: fig.add_vline(x=cw, line_dash="dash", line_color="green", line_width=3, annotation_text=f"買權牆: {cw:.0f}", annotation_font=line_font)
     if pw: fig.add_vline(x=pw, line_dash="dash", line_color="red", line_width=3, annotation_text=f"賣權牆: {pw:.0f}", annotation_font=line_font)
@@ -183,7 +183,7 @@ else:
             cw, pw, _ = get_levels(df_oi)
             _, _, v_flip = get_levels(df_vol)
 
-            # 頂部大字體指標
+            # 頂部指標看板
             c1, c2, c3 = st.columns(3)
             with c1: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>多空分界 (Pivot)<br><b style='font-size:35px; color:black;'>{v_flip:.0f}</b></div>", unsafe_allow_html=True)
             with c2: st.markdown(f"<div style='text-align:center; background:white; padding:15px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>買權牆 (Call Wall)<br><b style='font-size:35px; color:green;'>{cw:.0f}</b></div>", unsafe_allow_html=True)
@@ -191,3 +191,17 @@ else:
 
             st.plotly_chart(create_vivid_plot(df_oi, df_vol, symbol), use_container_width=True)
             st.divider()
+
+# --- 底部解讀說明 ---
+with st.expander("📖 數據解讀說明 (GEX 概念指南)", expanded=True):
+    st.markdown("""
+    ### 🔵 淨 GEX (Net Gamma Exposure) —— 「結構性資金」
+    * **計算來源**：依據 **未平倉合約 (Open Interest, OI)**。
+    * **單位解讀**：這是目前市場上所有「留過夜」的倉位所累積的總曝險金額。它代表了市場的底層結構，反映的是大戶、法人長線佈局的資金實力。
+    * **例子**：如果 6900 點的淨 GEX 是 10 億美元，代表指數每跌 1%，做市商在該價位附近可能需要賣出價值 10 億美元的部位來對沖（如果是負 Gamma 區）。
+
+    ### 🟠 波動 GEX (Vol Gamma Exposure) —— 「動態資金」
+    * **計算來源**：依據 **當日成交量 (Volume)**。
+    * **單位解讀**：這是 **「今天正在發生」** 的資金曝險。它代表的是日內交易者、當沖客或剛進場的熱錢。
+    * **例子**：如果波動 GEX 突然飆升，即使淨 GEX 沒變，也代表當下有大量資金正在特定價位進行博弈，是極其敏感的短線訊號。
+    """, unsafe_allow_html=True)
