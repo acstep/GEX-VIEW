@@ -3,52 +3,49 @@ import pandas as pd
 import numpy as np
 import os
 import glob
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from scipy.interpolate import interp1d
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # --- 頁面基本設定 ---
 st.set_page_config(page_title="專業級 ES & NQ 數據監控系統", layout="wide")
 
-# 自定義 CSS 背景 (淡藍色)
+# 背景淡藍色
 st.markdown("""
     <style>
     .stApp { background-color: #F0F8FF; }
     </style>
     """, unsafe_allow_html=True)
 
-# 組態設定 (包含期貨點數換算 Basis)
+# 組態設定 (含 Basis 價差換算)
 CONFIG = {
     "SPX": {
-        "label": "ES / SPX (標普 500)",
-        "basis": 17.4,  
+        "label": "ES / SPX (標普 500 期貨)",
+        "basis": 17.4,  # ES 比現貨高約 17.4 點
         "keywords": ["SPX", "ES"],
-        "width_bar": 1.5,
+        "color_call": "#1f77b4", # 專業藍
+        "color_put": "#ff7f0e",  # 專業橘
         "last_price_idx": 6861.89
     },
     "NQ": {
-        "label": "NQ / NASDAQ 100 (那指)",
-        "basis": 57.6,  
+        "label": "NQ / NASDAQ 100 (那指期貨)",
+        "basis": 57.6,  # NQ 比現貨高約 57.6 點
         "keywords": ["IUXX", "NQ"],
-        "width_bar": 15.0,
+        "color_call": "#000080", # 深藍
+        "color_put": "#FF4500",  # 橘紅
         "last_price_idx": 24797.17
     }
 }
 DATA_DIR = "data"
 
-# --- 數據處理核心 ---
-
+# --- 數據自動讀取與清洗 ---
 def get_latest_files(symbol_keywords):
     if not os.path.exists(DATA_DIR): return None, None
     all_files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
     if not all_files: return None, None
-    
     symbol_files = [f for f in all_files if any(k.upper() in os.path.basename(f).upper() for k in symbol_keywords)]
     if not symbol_files: return None, None
-    
     oi_files = [f for f in symbol_files if "open-interest" in f.lower()]
     vol_files = [f for f in symbol_files if "open-interest" not in f.lower()]
-    
     latest_oi = max(oi_files, key=os.path.getmtime) if oi_files else None
     latest_vol = max(vol_files, key=os.path.getmtime) if vol_files else None
     return latest_oi, latest_vol
@@ -58,141 +55,95 @@ def clean_data(filepath, basis=0):
     for col in df.columns:
         if df[col].dtype == 'object':
             df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce')
-    
     df = df.dropna(subset=['Strike']).sort_values('Strike')
-    df['Strike'] = df['Strike'] + basis
+    df['Strike'] = df['Strike'] + basis # 換算為期貨點數
     return df
 
-def find_flip(df):
-    if 'Gamma Exposure Profile' not in df.columns: return None
-    profile = df['Gamma Exposure Profile'].values
-    strikes = df['Strike'].values
-    for i in range(len(profile) - 1):
-        if not np.isnan(profile[i]) and not np.isnan(profile[i+1]):
-            if profile[i] * profile[i+1] <= 0:
-                x1, y1 = strikes[i], profile[i]
-                x2, y2 = strikes[i+1], profile[i+1]
-                if y2 != y1: return x1 - y1 * (x2 - x1) / (y2 - y1)
-    return None
+# --- Plotly 繪圖核心 (內建 Tooltip 與中文支援) ---
 
-# --- 繪圖函式庫 ---
-
-def plot_combined_kline(oi_file, current_fut_price, symbol):
-    """15分鐘 K線與水平 OI 對照圖"""
+def draw_kline_oi_chart(oi_file, fut_price, symbol):
+    """圖表 1: 15分K線 + 水平 OI 牆 (上下編排的第一張)"""
+    # 模擬 15 分鐘數據
     np.random.seed(100 if symbol == "SPX" else 42)
-    dates = pd.date_range(end=pd.Timestamp.now(), periods=200, freq='15min')
+    dates = pd.date_range(end=pd.Timestamp.now(), periods=150, freq='15min')
     vol = 25 if symbol == "NQ" else 4
-    path = np.cumsum(np.random.normal(0, vol, len(dates))) + current_fut_price
-    df_k = pd.DataFrame({'Close': path, 'Open': path - np.random.normal(0, vol, len(dates))}, index=dates)
-    df_k['High'] = df_k[['Open', 'Close']].max(axis=1) + 2
-    df_k['Low'] = df_k[['Open', 'Close']].min(axis=1) - 2
-
+    path = np.cumsum(np.random.normal(0, vol, len(dates))) + fut_price
+    
     df_oi = clean_data(oi_file, CONFIG[symbol]['basis'])
     y_range = 150 if symbol == "SPX" else 500
-    df_oi_v = df_oi[(df_oi['Strike'] >= current_fut_price - y_range) & (df_oi['Strike'] <= current_fut_price + y_range)]
+    df_oi_v = df_oi[(df_oi['Strike'] >= fut_price - y_range) & (df_oi['Strike'] <= fut_price + y_range)]
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6), gridspec_kw={'width_ratios': [3, 1], 'wspace': 0.05}, sharey=True)
+    fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.02, 
+                        column_widths=[0.75, 0.25], subplot_titles=(f"{symbol} 15m K線", "OI 籌碼牆"))
+
+    # 左：K線
+    fig.add_trace(go.Candlestick(x=dates, open=path-2, high=path+5, low=path-5, close=path, name="K線"), row=1, col=1)
     
-    ax1.vlines(df_k.index, df_k['Low'], df_k['High'], color='black', linewidth=0.5)
-    up, down = df_k[df_k['Close'] >= df_k['Open']], df_k[df_k['Close'] < df_k['Open']]
-    ax1.bar(up.index, up['Close']-up['Open'], bottom=up['Open'], color='green', width=0.005)
-    ax1.bar(down.index, down['Open']-down['Close'], bottom=down['Close'], color='red', width=0.005)
-    ax1.axhline(current_fut_price, color='blue', linestyle='--')
-    ax1.set_title(f"{symbol} 15m 期貨 K線對照", fontsize=14, fontweight='bold')
+    # 右：水平 OI (支援 Tooltip)
+    fig.add_trace(go.Bar(y=df_oi_v['Strike'], x=df_oi_v['Call Open Interest']/1e3, orientation='h', 
+                         name="Call OI (K)", marker_color='blue', hovertemplate="履約價: %{y}<br>Call OI: %{x:,.0f}K"), row=1, col=2)
+    fig.add_trace(go.Bar(y=df_oi_v['Strike'], x=-df_oi_v['Put Open Interest']/1e3, orientation='h', 
+                         name="Put OI (K)", marker_color='orange', hovertemplate="履約價: %{y}<br>Put OI: %{x:,.0f}K"), row=1, col=2)
+
+    fig.add_hline(y=fut_price, line_dash="dash", line_color="green", annotation_text=f"期貨現價:{fut_price:,.1f}")
+    fig.update_layout(height=600, showlegend=False, xaxis_rangeslider_visible=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+def draw_gamma_analysis(gamma_df, fut_price, symbol):
+    """圖表 2: 淨 Gamma 曝險圖"""
+    scale = 1e8 # 單位：億美元
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
     
-    ax2.barh(df_oi_v['Strike'], df_oi_v['Call Open Interest']/1e3, color='blue', height=CONFIG[symbol]['width_bar'], label='Call')
-    ax2.barh(df_oi_v['Strike'], -df_oi_v['Put Open Interest']/1e3, color='orange', height=CONFIG[symbol]['width_bar'], label='Put')
-    ax2.axvline(0, color='black', linewidth=1)
-    ax2.set_xlabel("OI (K 口)")
-    ax2.legend()
-    st.pyplot(fig)
-
-def plot_net_gamma(df, current_fut_price, symbol):
-    """淨 Gamma 曝險與累計曲線"""
-    flip = find_flip(df)
-    fig, ax1 = plt.subplots(figsize=(12, 5))
-    scale = 1e8 
+    # 柱狀圖
+    fig.add_trace(go.Bar(x=gamma_df['Strike'], y=gamma_df['Net Gamma Exposure']/scale, 
+                         name="淨 GEX (億)", marker_color='blue', opacity=0.5,
+                         hovertemplate="履約價: %{x}<br>淨曝險: %{y:.2f} 億"), secondary_y=False)
     
-    net_gex = df['Net Gamma Exposure'] / scale
-    colors = ['blue' if x >= 0 else 'orange' for x in net_gex]
-    ax1.bar(df['Strike'], net_gex, color=colors, alpha=0.7, width=df['Strike'].diff().median()*0.8)
+    # 累計曲線
+    fig.add_trace(go.Scatter(x=gamma_df['Strike'], y=gamma_df['Gamma Exposure Profile']/1e9, 
+                             name="累計 GEX (B)", line=dict(color='dodgerblue', width=3),
+                             hovertemplate="價格移動至此<br>總曝險: %{y:.2f} B"), secondary_y=True)
     
-    ax2 = ax1.twinx()
-    f_interp = interp1d(df['Strike'], df['Gamma Exposure Profile']/1e9, kind='cubic', fill_value="extrapolate")
-    s_new = np.linspace(df['Strike'].min(), df['Strike'].max(), 300)
-    ax2.plot(s_new, f_interp(s_new), color='#3498db', linewidth=2.5)
+    fig.add_vline(x=fut_price, line_dash="dash", line_color="green")
+    fig.update_layout(title=f"{symbol} 淨 Gamma 分佈與累計曲線 (單位：億美元)", height=450)
+    st.plotly_chart(fig, use_container_width=True)
+
+def draw_cp_details(oi_df, fut_price, symbol, mode="Gamma"):
+    """圖表 3 & 4: 買賣權對比圖"""
+    scale = 1e8 if mode == "Gamma" else 1e3
+    unit = "億" if mode == "Gamma" else "K"
+    col_c = f"Call {mode} Exposure" if mode == "Gamma" else "Call Open Interest"
+    col_p = f"Put {mode} Exposure" if mode == "Gamma" else "Put Open Interest"
     
-    if flip:
-        ax1.axvline(flip, color='red', linestyle='-', linewidth=2)
-        ax1.axvspan(df['Strike'].min(), flip, color='red', alpha=0.05)
-        ax1.axvspan(flip, df['Strike'].max(), color='green', alpha=0.05)
-        ax1.text(flip, ax1.get_ylim()[1]*0.85, f"Flip: {flip:,.1f}", color='red', fontweight='bold', ha='right', fontsize=12)
-
-    ax1.axvline(current_fut_price, color='green', linestyle='--', linewidth=2)
-    ax1.set_title(f"{symbol} 淨 Gamma 曝險分布 (單位: 億美元)", fontsize=14, fontweight='bold')
-    st.pyplot(fig)
-
-def plot_cp_gamma(df, current_fut_price, symbol):
-    """買賣權 Gamma 對比"""
-    fig, ax = plt.subplots(figsize=(12, 4))
-    scale = 1e8
-    ax.bar(df['Strike'], df['Call Gamma Exposure']/scale, color='blue', label='Call GEX', alpha=0.6)
-    ax.bar(df['Strike'], df['Put Gamma Exposure']/scale, color='orange', label='Put GEX', alpha=0.6)
-    ax.axvline(current_fut_price, color='green', linestyle='--', linewidth=1.5)
-    ax.set_title(f"{symbol} 買賣權 Gamma 對沖壓力對比", fontsize=12, fontweight='bold')
-    ax.legend()
-    st.pyplot(fig)
-
-def plot_cp_oi(df, current_fut_price, symbol):
-    """買賣權 OI 分佈"""
-    fig, ax = plt.subplots(figsize=(12, 4))
-    ax.bar(df['Strike'], df['Call Open Interest']/1e3, color='blue', label='Call OI (K)', alpha=0.6)
-    ax.bar(df['Strike'], -df['Put Open Interest']/1e3, color='orange', label='Put OI (K)', alpha=0.6)
-    ax.axvline(current_fut_price, color='green', linestyle='--', linewidth=1.5)
-    ax.axhline(0, color='black', linewidth=0.8)
-    ax.set_title(f"{symbol} 未平倉合約 (OI) 分佈牆", fontsize=12, fontweight='bold')
-    ax.legend()
-    st.pyplot(fig)
-
-# --- 主介面 ---
-
-st.markdown("<h1 style='text-align: center; color: #001F3F;'>🏹 專業級 ES & NQ 數據監控系統</h1>", unsafe_allow_html=True)
-
-# 執行 SPX / ES 分析 (上半部)
-st.markdown("---")
-st.markdown("## 🇺🇸 ES (標普 500 期貨)")
-oi_f_spx, vol_f_spx = get_latest_files(CONFIG["SPX"]["keywords"])
-
-if oi_f_spx and vol_f_spx:
-    df_vol_spx = clean_data(vol_f_spx, CONFIG["SPX"]["basis"])
-    df_oi_spx = clean_data(oi_f_spx, CONFIG["SPX"]["basis"])
-    fut_p_spx = CONFIG["SPX"]["last_price_idx"] + CONFIG["SPX"]["basis"]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=oi_df['Strike'], y=oi_df[col_c]/scale, name=f"Call {mode}", marker_color='blue'))
+    fig.add_trace(go.Bar(x=oi_df['Strike'], y=oi_df[col_p]/scale if mode=="Gamma" else -oi_df[col_p]/scale, 
+                         name=f"Put {mode}", marker_color='orange'))
     
-    # 畫四張圖
-    plot_combined_kline(oi_f_spx, fut_p_spx, "SPX")
-    plot_net_gamma(df_vol_spx, fut_p_spx, "SPX")
-    plot_cp_gamma(df_oi_spx, fut_p_spx, "SPX")
-    plot_cp_oi(df_oi_spx, fut_p_spx, "SPX")
-else:
-    st.error("❌ 找不到 SPX 相關檔案")
+    fig.add_vline(x=fut_price, line_dash="dash", line_color="green")
+    fig.update_layout(title=f"{symbol} 買賣權 {mode} 對比 (單位：{unit})", height=400, barmode='relative')
+    st.plotly_chart(fig, use_container_width=True)
 
-# 執行 NDX / NQ 分析 (下半部)
-st.markdown("---")
-st.markdown("## 💻 NQ (那斯達克 100 期貨)")
-oi_f_ndx, vol_f_ndx = get_latest_files(CONFIG["NQ"]["keywords"])
+# --- 主程式介面 ---
+st.markdown("<h1 style='text-align: center; color: #001F3F;'>🏹 ES & NQ 期貨籌碼動態監控系統</h1>", unsafe_allow_html=True)
 
-if oi_f_ndx and vol_f_ndx:
-    df_vol_ndx = clean_data(vol_f_ndx, CONFIG["NQ"]["basis"])
-    df_oi_ndx = clean_data(oi_f_ndx, CONFIG["NQ"]["basis"])
-    fut_p_ndx = CONFIG["NQ"]["last_price_idx"] + CONFIG["NQ"]["basis"]
+for asset in ["SPX", "NQ"]:
+    st.markdown(f"## 📊 {CONFIG[asset]['label']} 分析區塊")
+    oi_f, vol_f = get_latest_files(CONFIG[asset]['keywords'])
     
-    # 畫四張圖
-    plot_combined_kline(oi_f_ndx, fut_p_ndx, "NQ")
-    plot_net_gamma(df_vol_ndx, fut_p_ndx, "NQ")
-    plot_cp_gamma(df_oi_ndx, fut_p_ndx, "NQ")
-    plot_cp_oi(df_oi_ndx, fut_p_ndx, "NQ")
-else:
-    st.error("❌ 找不到 NDX 相關檔案")
-
-st.divider()
-st.info("💡 提示：本系統自動讀取 DATA 資料夾中最新的 4 個 CSV 檔案。")
+    if oi_f and vol_f:
+        # 計算期貨價差換算
+        basis = CONFIG[asset]['basis']
+        fut_p = CONFIG[asset]['last_price_idx'] + basis # 換算為期貨點位
+        
+        df_oi = clean_data(oi_f, basis)
+        df_vol = clean_data(vol_f, basis)
+        
+        # 垂直編排四張圖
+        draw_kline_oi_chart(oi_f, fut_p, asset)
+        draw_gamma_analysis(df_vol, fut_p, asset)
+        draw_cp_details(df_oi, fut_p, asset, mode="Gamma")
+        draw_cp_details(df_oi, fut_p, asset, mode="Open Interest")
+    else:
+        st.error(f"❌ 找不到 {asset} 的數據檔案")
+    st.markdown("---")
