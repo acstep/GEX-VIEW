@@ -57,12 +57,13 @@ DATA_DIR = "data"
 
 @st.cache_data(ttl=300)
 def fetch_yahoo_kline(ticker, basis):
-    """抓取 Yahoo 真實 15 分鐘數據並修正基差，同時處理 MultiIndex 問題"""
+    """抓取 Yahoo 真實 15 分鐘數據（近 3 個月）並修正基差"""
     try:
-        df = yf.download(ticker, period="1mo", interval="15m", progress=False)
+        # 抓取最近 3 個月的 15m 數據 (Yahoo 限制 15m 數據通常最多提供 60 天)
+        df = yf.download(ticker, period="3mo", interval="15m", progress=False)
         if df.empty: return None
         
-        # 修正 yfinance 可能產生的多層索引 (MultiIndex) 警告
+        # 處理 yfinance 可能產生的多層索引 (MultiIndex)
         if df.columns.nlevels > 1:
             df.columns = df.columns.get_level_values(0)
             
@@ -105,7 +106,7 @@ def find_gamma_flip(df):
     return None
 
 def get_safe_float(series):
-    """安全轉換 Series 最後一個元素為 float，避免 FutureWarning"""
+    """安全轉換最後一個元素為 float，避免 FutureWarning"""
     val = series.iloc[-1]
     if isinstance(val, pd.Series):
         return float(val.iloc[0])
@@ -114,31 +115,54 @@ def get_safe_float(series):
 # --- 3. 繪圖組件 (互動式 Plotly) ---
 
 def draw_kline_profile(oi_df, symbol):
-    """圖 1: 真實 15m K線 + 水平 OI 牆"""
+    """圖 1: 真實 15m K線 (3個月) + 水平 OI 牆"""
     df_k = fetch_yahoo_kline(CONFIG[symbol]['ticker'], CONFIG[symbol]['basis'])
     if df_k is None: 
-        st.warning("無法抓取 Yahoo 數據")
+        st.warning(f"無法獲取 {symbol} 的 Yahoo 真實數據。")
         return
 
-    # 安全獲取現價
+    # 安全獲取最新現價
     last_p = get_safe_float(df_k['Close'])
     
+    # 過濾顯示範圍 (以現價上下各 2% 左右顯示，避免畫面太擠)
     y_range = 150 if symbol == "SPX" else 500
     oi_v = oi_df[(oi_df['Strike_Fut'] >= last_p - y_range) & (oi_df['Strike_Fut'] <= last_p + y_range)]
 
-    fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.01, column_widths=[0.75, 0.25])
+    fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.01, column_widths=[0.8, 0.2])
     
-    # K線
-    fig.add_trace(go.Candlestick(x=df_k.index, open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'], name="K線"), row=1, col=1)
+    # K線 (支援 3 個月數據捲動)
+    fig.add_trace(go.Candlestick(
+        x=df_k.index, 
+        open=df_k['Open'], high=df_k['High'], 
+        low=df_k['Low'], close=df_k['Close'], 
+        name="15m K線"
+    ), row=1, col=1)
     
-    # OI 牆 (TIP 顯示)
-    fig.add_trace(go.Bar(y=oi_v['Strike_Fut'], x=oi_v['Call Open Interest']/1e3, orientation='h', name="Call OI(K)", marker_color=COLORS['pos_bar'], hovertemplate="Strike: %{y}<br>Call OI: %{x:.1f}K"), row=1, col=2)
-    fig.add_trace(go.Bar(y=oi_v['Strike_Fut'], x=-oi_v['Put Open Interest']/1e3, orientation='h', name="Put OI(K)", marker_color=COLORS['neg_bar'], hovertemplate="Strike: %{y}<br>Put OI: %{x:.1f}K"), row=1, col=2)
+    # 水平 OI 牆 (TIP 顯示)
+    fig.add_trace(go.Bar(
+        y=oi_v['Strike_Fut'], x=oi_v['Call Open Interest']/1e3, 
+        orientation='h', name="Call OI(K)", marker_color=COLORS['pos_bar'], 
+        hovertemplate="Strike: %{y}<br>Call OI: %{x:.1f}K"
+    ), row=1, col=2)
+    
+    fig.add_trace(go.Bar(
+        y=oi_v['Strike_Fut'], x=-oi_v['Put Open Interest']/1e3, 
+        orientation='h', name="Put OI(K)", marker_color=COLORS['neg_bar'], 
+        hovertemplate="Strike: %{y}<br>Put OI: %{x:.1f}K"
+    ), row=1, col=2)
 
     fig.add_hline(y=last_p, line_dash="dash", line_color=COLORS['price_line'], annotation_text=f"期貨現價:{last_p:,.1f}")
-    fig.update_layout(height=600, template="plotly_white", showlegend=False, xaxis_rangeslider_visible=False)
     
-    # 修正 Streamlit API 警告: use_container_width=True -> width='stretch'
+    # 設定 X 軸範圍，預設顯示最近 3 天，其餘可往回拉
+    fig.update_xaxes(range=[df_k.index[-200], df_k.index[-1]], row=1, col=1)
+    
+    fig.update_layout(
+        height=700, 
+        template="plotly_white", 
+        showlegend=False, 
+        xaxis_rangeslider_visible=True  # 開啟下方滑桿方便查看 3 個月數據
+    )
+    
     st.plotly_chart(fig, width='stretch')
 
 def draw_gex_main(gamma_df, symbol):
@@ -180,7 +204,7 @@ def draw_detail_bars(oi_df, symbol, mode="Gamma"):
 
 # --- 4. 主程式 ---
 
-st.markdown("<h1 style='text-align: center;'>🎯 ES & NQ 真實籌碼監控系統</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>🎯 ES & NQ 真實籌碼監控系統 (3個月 15m K線)</h1>", unsafe_allow_html=True)
 
 for asset in ["SPX", "NQ"]:
     st.markdown(f"## {CONFIG[asset]['label']}")
@@ -190,6 +214,7 @@ for asset in ["SPX", "NQ"]:
         df_oi = clean_csv(oi_f, CONFIG[asset]['basis'])
         df_vol = clean_csv(vol_f, CONFIG[asset]['basis'])
         
+        # 依序垂直呈現 4 張圖
         draw_kline_profile(df_oi, asset)
         draw_gex_main(df_vol, asset)
         draw_detail_bars(df_oi, asset, mode="Gamma")
@@ -197,4 +222,4 @@ for asset in ["SPX", "NQ"]:
     else:
         st.error(f"❌ 請確認 DATA 資料夾內有 {asset} 的最新 CSV 檔案")
 
-st.info("💡 系統已更新：已修復 Pandas float 轉換警告與 Streamlit API 警告。")
+st.info("💡 數據說明：K線圖已擴展至 3 個月歷史（受 Yahoo 限制，內盤數據最長約 60 天）。下方設有縮放滑桿方便查看歷史。")
