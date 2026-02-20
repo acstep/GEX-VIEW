@@ -6,14 +6,20 @@ import glob
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# 頁面設定
-st.set_page_config(page_title="Gamma Map Vertical", layout="wide")
+st.set_page_config(page_title="Gamma Map - Advanced View", layout="wide")
 
+# 設定參數
 CONFIG = {
-    "SPX": {"label": "ES / SPX", "offset": 0, "range": 150, "color": "#1f77b4", "keywords": ["SPX", "ES"]},
-    "NQ": {"label": "NQ / NASDAQ", "offset": 75, "range": 600, "color": "#008080", "keywords": ["IUXX", "NQ"]}
+    "SPX": {"label": "ES / SPX", "offset": 0, "default_range": 300, "color": "#1f77b4", "keywords": ["SPX", "ES"]},
+    "NQ": {"label": "NQ / NASDAQ", "offset": 75, "default_range": 800, "color": "#008080", "keywords": ["IUXX", "NQ"]}
 }
 DATA_DIR = "data"
+
+# --- 側邊欄控制 ---
+st.sidebar.header("圖表設定")
+view_range_spx = st.sidebar.slider("SPX 顯示範圍 (+/-)", 100, 1500, 500)
+view_range_nq = st.sidebar.slider("NQ 顯示範圍 (+/-)", 200, 2000, 800)
+range_map = {"SPX": view_range_spx, "NQ": view_range_nq}
 
 def get_latest_files(symbol_keywords):
     search_path = os.path.join(DATA_DIR, "*.csv")
@@ -38,8 +44,10 @@ def clean_data(df, offset):
 
 def get_levels(df):
     if df is None or df.empty: return None, None, None
-    cw = df.loc[df['Net Gamma Exposure'].idxmax(), 'Adjusted_Strike']
-    pw = df.loc[df['Net Gamma Exposure'].idxmin(), 'Adjusted_Strike']
+    cw = df.loc[df['Call Open Interest'].idxmax(), 'Adjusted_Strike'] # 改用最大 OI 找牆
+    pw = df.loc[df['Put Open Interest'].idxmax(), 'Adjusted_Strike']
+    
+    # 計算 Pivot (Gamma Flip)
     flip = None
     for i in range(len(df)-1):
         y1, y2 = df.iloc[i]['Net Gamma Exposure'], df.iloc[i+1]['Net Gamma Exposure']
@@ -49,89 +57,70 @@ def get_levels(df):
             break
     return cw, pw, flip
 
-def create_interactive_plot(df_oi, df_vol, symbol):
+def create_plot(df_oi, df_vol, symbol):
     conf = CONFIG[symbol]
-    cw, pw, _ = get_levels(df_oi)
-    _, _, flip = get_levels(df_vol)
+    cw, pw, flip = get_levels(df_oi)
+    _, _, vol_flip = get_levels(df_vol)
+    target_flip = vol_flip if vol_flip else flip
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # Call OI 柱狀圖
+    # Call OI 柱狀圖 (加上精確數字提示)
     fig.add_trace(go.Bar(
         x=df_oi['Adjusted_Strike'], y=df_oi['Call Open Interest'],
-        name='Call OI', marker_color=conf['color'], opacity=0.4,
-        hovertemplate='Price: %{x}<br>Call OI: %{y}<extra></extra>'
+        name='Call OI', marker_color=conf['color'], opacity=0.5,
+        hovertemplate='<b>價格: %{x}</b><br>看漲口數: %{y:,.0f}<extra></extra>'
     ), secondary_y=False)
 
     # Put OI 柱狀圖
     fig.add_trace(go.Bar(
         x=df_oi['Adjusted_Strike'], y=-df_oi['Put Open Interest'],
-        name='Put OI', marker_color='crimson', opacity=0.4,
-        hovertemplate='Price: %{x}<br>Put OI: %{y}<extra></extra>'
+        name='Put OI', marker_color='crimson', opacity=0.5,
+        hovertemplate='<b>價格: %{x}</b><br>看跌口數: %{y:,.0f}<extra></extra>'
     ), secondary_y=False)
 
-    # OI Gamma 曲線
+    # Net Gamma 曲線
     fig.add_trace(go.Scatter(
         x=df_oi['Adjusted_Strike'], y=df_oi['Net Gamma Exposure'],
-        name='OI Gamma', line=dict(color='blue', width=2.5),
-        hovertemplate='Price: %{x}<br>OI GEX: %{y:.2f}<extra></extra>'
+        name='Net Gamma', line=dict(color='yellow', width=2),
+        hovertemplate='價格: %{x}<br>Gamma值: %{y:.2f}<extra></extra>'
     ), secondary_y=True)
 
-    # Vol Gamma 曲線
-    fig.add_trace(go.Scatter(
-        x=df_vol['Adjusted_Strike'], y=df_vol['Net Gamma Exposure'],
-        name='Vol Gamma', line=dict(color='orange', width=2, dash='dash'),
-        hovertemplate='Price: %{x}<br>Vol GEX: %{y:.2f}<extra></extra>'
-    ), secondary_y=True)
+    # 標註 Call Wall
+    if cw:
+        fig.add_vline(x=cw, line_dash="dash", line_color="lime", line_width=2)
+        fig.add_annotation(x=cw, y=1, yref="paper", text=f"主力牆(Call): {cw:.0f}", showarrow=False, bgcolor="green", font=dict(color="white"))
 
-    # 關鍵位標註
-    if cw: fig.add_vline(x=cw, line_dash="dot", line_color="green", annotation_text=f"CW:{cw:.0f}", annotation_position="top left")
-    if pw: fig.add_vline(x=pw, line_dash="dot", line_color="red", annotation_text=f"PW:{pw:.0f}", annotation_position="top left")
-    if flip: fig.add_vline(x=flip, line_width=2.5, line_color="orange", annotation_text=f"Pivot:{flip:.0f}", annotation_position="bottom right")
-
-    # 版面設定 - 增加高度讓上下看更清晰
+    # 設定顯示範圍 (使用側邊欄的滑桿值)
+    current_range = range_map[symbol]
     fig.update_layout(
-        title=f"<b>{conf['label']} Integrated Gamma Map</b>",
+        title=f"<b>{conf['label']} 互動交易地圖</b>",
         hovermode="x unified",
-        height=550, # 增加高度
-        margin=dict(l=50, r=50, t=50, b=50),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis=dict(title="Price Level", range=[flip-conf['range'], flip+conf['range']] if flip else None),
-        yaxis=dict(title="Open Interest (Contracts)"),
-        yaxis2=dict(title="Net Gamma Exposure", overlaying='y', side='right')
+        height=600,
+        xaxis=dict(range=[target_flip - current_range, target_flip + current_range] if target_flip else None),
+        template="plotly_dark" # 使用深色模式讓顏色更顯眼
     )
     return fig
 
-# --- 主介面 ---
-st.title("📊 市場交易地圖 (上下佈局)")
+# --- 主程式 ---
+st.title("📈 專業 Gamma 牆監測站")
 
-if not os.path.exists(DATA_DIR):
-    st.error(f"找不到目錄: {DATA_DIR}")
-else:
-    # 按照 SPX -> NQ 的順序垂直排列
-    for symbol in ["SPX", "NQ"]:
-        oi_file, vol_file = get_latest_files(CONFIG[symbol]['keywords'])
+for symbol in ["SPX", "NQ"]:
+    oi_file, vol_file = get_latest_files(CONFIG[symbol]['keywords'])
+    if oi_file and vol_file:
+        df_oi = clean_data(pd.read_csv(oi_file), CONFIG[symbol]['offset'])
+        df_vol = clean_data(pd.read_csv(vol_file), CONFIG[symbol]['offset'])
         
-        if oi_file and vol_file:
-            st.subheader(f"📈 {CONFIG[symbol]['label']} 分析")
-            
-            df_oi = clean_data(pd.read_csv(oi_file), CONFIG[symbol]['offset'])
-            df_vol = clean_data(pd.read_csv(vol_file), CONFIG[symbol]['offset'])
-            
-            # 指標數據卡片
-            cw, pw, _ = get_levels(df_oi)
-            _, _, flip = get_levels(df_vol)
-            
-            c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
-            c1.metric("Pivot", f"{flip:.0f}" if flip else "N/A")
-            c2.metric("Call Wall", f"{cw:.0f}" if cw else "N/A")
-            c3.metric("Put Wall", f"{pw:.0f}" if pw else "N/A")
-            c4.caption(f"📅 數據源: {os.path.basename(vol_file)}")
+        cw, pw, flip = get_levels(df_oi)
+        _, _, v_flip = get_levels(df_vol)
 
-            # 顯示圖表
-            fig = create_interactive_plot(df_oi, df_vol, symbol)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            st.divider() # 加入分隔線
-        else:
-            st.warning(f"缺少 {symbol} 最新檔案，請檢查 /data 資料夾。")
+        st.subheader(f"{CONFIG[symbol]['label']}")
+        
+        # 指標欄位
+        c1, c2, c3 = st.columns(3)
+        c1.metric("當前轉折 (Pivot)", f"{v_flip:.0f}")
+        c2.metric("最大阻力 (Call Wall)", f"{cw:.0f}")
+        c3.metric("最大支撐 (Put Wall)", f"{pw:.0f}")
+
+        st.plotly_chart(create_plot(df_oi, df_vol, symbol), use_container_width=True)
+        st.divider()
