@@ -10,7 +10,7 @@ from plotly.subplots import make_subplots
 from datetime import datetime
 
 # --- 1. 頁面基本設定 ---
-st.set_page_config(page_title="ES & NQ 數據同步監控", layout="wide")
+st.set_page_config(page_title="ES & NQ 籌碼現價居中監控", layout="wide")
 
 st.markdown("""
     <style>
@@ -52,7 +52,6 @@ def fetch_kline_data(ticker, offset):
         df = yf.download(ticker, period="60d", interval="15m", progress=False)
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        # 關鍵：先轉 float 再加基差，避免 Series 運算問題
         for col in ['Open', 'High', 'Low', 'Close']:
             df[col] = df[col].astype(float) + offset
         df['time_label'] = df.index.strftime('%m-%d %H:%M')
@@ -71,54 +70,69 @@ def clean_csv(filepath, offset):
     df['Adjusted_Strike'] = df['Strike'] + offset
     return df
 
-# --- 3. 繪圖組件 (修正：SPX 視角同步優化) ---
+# --- 3. 繪圖組件 (修正：現價居中 + 籌碼範圍對稱) ---
 
 def draw_chart_1_kline(df_k, df_oi, symbol):
-    """圖 1: 修正 SPX 點位對齊與縮放，使其與 NDX 視覺同步"""
+    """圖 1: 以現價為中心，並根據 OI 分佈調整 Y 軸"""
     last_p = float(df_k['Close'].iloc[-1])
+    conf = CONFIG[symbol]
     
-    # 重新計算 Y 軸範圍：以現價為中心，參考最大 OI 牆
-    cw_idx = df_oi['Call Open Interest'].idxmax()
-    pw_idx = df_oi['Put Open Interest'].idxmax()
-    wall_min = df_oi.loc[pw_idx, 'Adjusted_Strike']
-    wall_max = df_oi.loc[cw_idx, 'Adjusted_Strike']
+    # 核心邏輯：找出 OI 大於 0 的執行價範圍
+    # 過濾出有意義的 OI 分佈 (排除過小的雜訊，取最大值的 1% 以上)
+    threshold = max(df_oi['Call Open Interest'].max(), df_oi['Put Open Interest'].max()) * 0.01
+    oi_active = df_oi[(df_oi['Call Open Interest'] > threshold) | (df_oi['Put Open Interest'] > threshold)]
     
-    # 計算視覺區間，確保現價與兩大牆都在視線內
-    v_min = min(wall_min, last_p)
-    v_max = max(wall_max, last_p)
+    active_min = oi_active['Adjusted_Strike'].min()
+    active_max = oi_active['Adjusted_Strike'].max()
     
-    # 增加 15% 呼吸空間 (使 K 線自然不擁擠)
-    padding = (v_max - v_min) * 0.15
-    y_min, y_max = v_min - padding, v_max + padding
+    # 計算以現價為中心，包含所有 OI 點位所需的半徑
+    dist_up = active_max - last_p
+    dist_down = last_p - active_min
+    max_dist = max(dist_up, dist_down, 50) # 至少留 50 點半徑
     
-    # 過濾右側 OI 數據
+    # 對稱縮放：現價 +/- 最大半徑，再加 15% 呼吸空間
+    y_min = last_p - (max_dist * 1.15)
+    y_max = last_p + (max_dist * 1.15)
+    
+    # 根據最終 Y 軸範圍篩選繪圖用 OI 數據
     oi_v = df_oi[(df_oi['Adjusted_Strike'] >= y_min) & (df_oi['Adjusted_Strike'] <= y_max)]
     diff = oi_v['Adjusted_Strike'].diff().median()
-    bar_w = (diff if not pd.isna(diff) and diff > 0 else CONFIG[symbol]['default_width']) * 0.75
+    bar_w = (diff if not pd.isna(diff) and diff > 0 else conf['default_width']) * 0.75
 
     fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0, column_widths=[0.82, 0.18])
     
-    # 1. K線圖 (同步配色)
+    # 1. 15m K線圖
     fig.add_trace(go.Candlestick(
         x=df_k['time_label'], open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'],
         increasing_line_color='#26A69A', decreasing_line_color='#EF5350',
         increasing_fillcolor='#26A69A', decreasing_fillcolor='#EF5350',
-        line_width=1, name="15m K線"
+        name="15m K線"
     ), row=1, col=1)
     
-    # 2. OI 牆 (同步點位)
-    fig.add_trace(go.Bar(y=oi_v['Adjusted_Strike'], x=oi_v['Call Open Interest']/1e3, orientation='h', marker_color="#0000FF", width=bar_w), row=1, col=2)
-    fig.add_trace(go.Bar(y=oi_v['Adjusted_Strike'], x=-oi_v['Put Open Interest']/1e3, orientation='h', marker_color="#FFA500", width=bar_w), row=1, col=2)
+    # 2. OI 牆
+    fig.add_trace(go.Bar(
+        y=oi_v['Adjusted_Strike'], x=oi_v['Call Open Interest']/1e3, orientation='h', 
+        marker_color="#0000FF", width=bar_w, name="Call OI",
+        hovertemplate="點數: %{y}<br>Call OI: %{x:.1f}K"
+    ), row=1, col=2)
+    fig.add_trace(go.Bar(
+        y=oi_v['Adjusted_Strike'], x=-oi_v['Put Open Interest']/1e3, orientation='h', 
+        marker_color="#FFA500", width=bar_w, name="Put OI",
+        hovertemplate="點數: %{y}<br>Put OI: %{x:.1f}K"
+    ), row=1, col=2)
     
-    # 設定 Y 軸 (強制同步)
+    # 強制 Y 軸居中同步
     fig.update_yaxes(range=[y_min, y_max], gridcolor='#E1E1E1', row=1, col=1)
     fig.update_yaxes(range=[y_min, y_max], row=1, col=2)
 
     total_bars = len(df_k)
     fig.update_xaxes(type='category', range=[max(0, total_bars-150), total_bars-1], row=1, col=1)
     
+    # 在現價畫一條醒目的基準線
+    fig.add_hline(y=last_p, line_dash="dash", line_color="#008000", line_width=2, annotation_text=f"CENTER: {last_p:.1f}")
+
     fig.update_layout(
-        height=620, margin=dict(t=30, b=10), template="plotly_white", 
+        height=700, margin=dict(t=30, b=10, l=10, r=10), template="plotly_white", 
         showlegend=False, xaxis_rangeslider_visible=False, hovermode="x unified"
     )
     st.plotly_chart(fig, use_container_width=True)
@@ -154,7 +168,7 @@ def draw_chart_3_details(df_data, last_p, symbol, mode="Gamma"):
 
 # --- 4. 主程式 ---
 
-st.markdown("<h1 style='text-align: center; margin-bottom: 0px;'>🎯 ES & NQ 同步監控系統 (15m)</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center; margin-bottom: 0px;'>🎯 ES & NQ 精確居中監控系統</h1>", unsafe_allow_html=True)
 
 for asset in ["SPX", "NQ"]:
     st.markdown(f"## {CONFIG[asset]['label']}")
