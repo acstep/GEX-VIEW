@@ -22,7 +22,6 @@ st.markdown("""
         margin-top: 10px; 
         margin-bottom: 5px; 
     }
-    .metric-card { text-align:center; background:white; padding:10px; border-radius:15px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); }
     .block-container { padding-top: 2rem; padding-bottom: 1rem; }
     </style>
     """, unsafe_allow_html=True)
@@ -74,48 +73,46 @@ def clean_csv(filepath, offset):
     df['Adjusted_Strike'] = df['Strike'] + offset
     return df
 
-# --- 3. 繪圖組件 (自動聚焦籌碼區間) ---
+# --- 3. 繪圖組件 (K線優化版) ---
 
 def draw_chart_1_kline(df_k, df_oi, symbol):
-    """圖 1: 自動聚焦於有 OI 籌碼區間的 K 線圖"""
+    """圖 1: 自然視覺 K 線圖 + 自動聚焦籌碼區間"""
     last_p = df_k['Close'].iloc[-1]
     
-    # 核心邏輯：找出右側 OI 有數值的部分
-    # 這裡我們定義「有值」為 OI 最大的前 10% 或是大於某個門檻的執行價區間
-    # 簡單起見，我們直接抓出 Call Wall 與 Put Wall，並往上下擴展
+    # 找出籌碼密集區間
     cw_idx = df_oi['Call Open Interest'].idxmax()
     pw_idx = df_oi['Put Open Interest'].idxmax()
     wall_min = min(df_oi.loc[cw_idx, 'Adjusted_Strike'], df_oi.loc[pw_idx, 'Adjusted_Strike'])
     wall_max = max(df_oi.loc[cw_idx, 'Adjusted_Strike'], df_oi.loc[pw_idx, 'Adjusted_Strike'])
     
-    # 在城牆區間上下各留 10% 的空白邊距
-    margin_val = (wall_max - wall_min) * 0.1
-    if margin_val == 0: margin_val = 50 # 預防只有一個執行價的情況
+    margin_val = (wall_max - wall_min) * 0.15  # 上下留 15% 呼吸空間
+    y_min, y_max = wall_min - margin_val, wall_max + margin_val
     
-    y_min = wall_min - margin_val
-    y_max = wall_max + margin_val
-    
-    # 篩選要畫在右邊的 OI 數據 (只畫這個區間)
     oi_v = df_oi[(df_oi['Adjusted_Strike'] >= y_min) & (df_oi['Adjusted_Strike'] <= y_max)]
     bar_w = (oi_v['Adjusted_Strike'].diff().median() if not oi_v.empty else 5) * 0.7
     
-    fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.01, column_widths=[0.8, 0.2])
+    fig = make_subplots(rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.01, column_widths=[0.82, 0.18])
     
-    # 1. K線圖
-    fig.add_trace(go.Candlestick(x=df_k['time_label'], open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'], name="K線"), row=1, col=1)
+    # 1. 優化後的 K線圖
+    fig.add_trace(go.Candlestick(
+        x=df_k['time_label'], 
+        open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'],
+        increasing_line_color='#26A69A', decreasing_line_color='#EF5350', # 專業看盤配色
+        increasing_fillcolor='#26A69A', decreasing_fillcolor='#EF5350',
+        line_width=1.2, name="K線"
+    ), row=1, col=1)
     
-    # 2. OI 牆 (TIP 顯示點位)
+    # 2. OI 牆
     fig.add_trace(go.Bar(y=oi_v['Adjusted_Strike'], x=oi_v['Call Open Interest']/1e3, orientation='h', marker_color="#0000FF", width=bar_w, hovertemplate="點數: %{y}<br>Call OI: %{x:.1f}K"), row=1, col=2)
     fig.add_trace(go.Bar(y=oi_v['Adjusted_Strike'], x=-oi_v['Put Open Interest']/1e3, orientation='h', marker_color="#FFA500", width=bar_w, hovertemplate="點數: %{y}<br>Put OI: %{x:.1f}K"), row=1, col=2)
     
     total_bars = len(df_k)
-    fig.update_xaxes(type='category', nticks=15, range=[total_bars-200, total_bars-1], row=1, col=1)
-    
-    # 關鍵：設定 Y 軸範圍只在有籌碼的部分
-    fig.update_yaxes(range=[y_min, y_max], row=1, col=1)
+    # 預設縮放至最近 300 根 (約 3-4 個交易日)，視覺最自然
+    fig.update_xaxes(type='category', nticks=12, range=[total_bars-300, total_bars-1], row=1, col=1)
+    fig.update_yaxes(range=[y_min, y_max], gridcolor='#E1E1E1', row=1, col=1)
 
     fig.update_layout(
-        height=600, 
+        height=620, 
         margin=dict(t=30, b=10, l=10, r=10), 
         template="plotly_white", 
         showlegend=False, 
@@ -123,6 +120,8 @@ def draw_chart_1_kline(df_k, df_oi, symbol):
         hovermode="x unified"
     )
     st.plotly_chart(fig, use_container_width=True)
+
+# ----------------- 其餘繪圖函數保持不變 -----------------
 
 def draw_chart_2_gex(df_vol, last_p, symbol):
     bar_w = (df_vol['Adjusted_Strike'].diff().median() if not df_vol.empty else 5) * 0.7
@@ -163,13 +162,9 @@ for asset in ["SPX", "NQ"]:
         
         if df_k is not None:
             last_p = df_k['Close'].iloc[-1]
-            # 1. K線牆 (自動聚焦有值區間)
             draw_chart_1_kline(df_k, df_oi, asset)
-            # 2. 淨 GEX
             draw_chart_2_gex(df_vol, last_p, asset)
-            # 3. Gamma 細節
             draw_chart_3_details(df_oi, last_p, asset, mode="Gamma")
-            # 4. OI 細節
             draw_chart_3_details(df_oi, last_p, asset, mode="Open Interest")
             st.divider()
 
